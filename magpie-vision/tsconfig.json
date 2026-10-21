@@ -4,8 +4,8 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "strict": true,
-    "declaration": true,
-    "skipLibCheck": true,
+    "noEmitOnError": true,
+    "rootDir": "src",
     "outDir": "."
   },
   "include": ["src/index.ts"]

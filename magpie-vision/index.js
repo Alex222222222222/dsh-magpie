@@ -82,6 +82,12 @@ function safeError(error, token) {
   const message = error instanceof Error ? error.message : String(error);
   return message.split(token).join('[redacted]');
 }
+function jsonValue(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+function jsonArray(value) {
+  return JSON.parse(JSON.stringify(value));
+}
 function textFromResult(result) {
   return result.content.filter((block)=>block.type === 'text' && typeof block.text === 'string').map((block)=>block.text).join('\n');
 }
@@ -159,6 +165,7 @@ export async function activate(ctx, config) {
       const bytes = await ctx.fs.readBytes(target, exec.signal, MAX_IMAGE_BYTES);
       exec.signal.throwIfAborted();
       const image = imageData(args.path, bytes);
+      if (disposed) throw new Error('magpie-vision: plugin is shutting down');
       const client = new Client({
         name: 'dsh-magpie-vision',
         version: '1.0.0'
@@ -188,9 +195,9 @@ export async function activate(ctx, config) {
         });
         if (result.isError === true) throw new Error(safeError(new Error(textFromResult(result) || 'MCP tool returned isError'), endpoint.token));
         return sanitizeResult({
-          content: result.content,
+          content: jsonArray(result.content),
           ...result.structuredContent === undefined ? {} : {
-            structuredContent: result.structuredContent
+            structuredContent: jsonValue(result.structuredContent)
           },
           ...result.isError === undefined ? {} : {
             isError: result.isError

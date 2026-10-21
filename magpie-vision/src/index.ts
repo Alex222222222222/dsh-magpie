@@ -85,6 +85,16 @@ function safeError(error: unknown, token: string): string {
   return message.split(token).join('[redacted]');
 }
 
+type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+
+function jsonValue(value: unknown): JsonValue {
+  return JSON.parse(JSON.stringify(value)) as JsonValue;
+}
+
+function jsonArray(value: unknown): JsonValue[] {
+  return JSON.parse(JSON.stringify(value)) as JsonValue[];
+}
+
 function textFromResult(result: { content: Array<Record<string, unknown>> }): string {
   return result.content.filter((block) => block.type === 'text' && typeof block.text === 'string').map((block) => block.text as string).join('\n');
 }
@@ -153,8 +163,8 @@ export async function activate(ctx: PluginContext, config: VisionConfig): Promis
         }, { signal: exec.signal });
         if (result.isError === true) throw new Error(safeError(new Error(textFromResult(result) || 'MCP tool returned isError'), endpoint.token));
         return sanitizeResult({
-          content: result.content,
-          ...(result.structuredContent === undefined ? {} : { structuredContent: result.structuredContent }),
+          content: jsonArray(result.content),
+          ...(result.structuredContent === undefined ? {} : { structuredContent: jsonValue(result.structuredContent) }),
           ...(result.isError === undefined ? {} : { isError: result.isError })
         }, endpoint.token);
       } catch (error) {
