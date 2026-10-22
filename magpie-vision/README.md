@@ -19,9 +19,9 @@ The endpoint URL is intentionally not preconfigured. When enabled, activation re
 
 ## Tool
 
-`analyze_image({ path, prompt? })` accepts a path relative to the active agent's session working directory and an optional question. The plugin rejects missing paths, symbolic links, directories, unsupported image content, and files over 20 MiB before making a network request. Supported content is PNG, JPEG, WebP, and GIF. The image is sent as a MIME-correct `data:<mime>;base64,...` argument to the MCP tool named `analyze_image`.
+`analyze_image({ path, prompt? })` accepts a path relative to the active agent's session working directory and an optional question. The plugin rejects paths that resolve outside that working directory, missing paths, symbolic links, directories, unsupported image content, and files over 20 MiB before making a network request. Supported content is PNG, JPEG, WebP, and GIF. The image is sent as a MIME-correct `data:<mime>;base64,...` argument to the MCP tool named `analyze_image`.
 
-The plugin uses the installed MCP TypeScript SDK's Streamable HTTP client. The SDK performs initialization and protocol-version negotiation; the bundle does not pin a protocol revision. Each tool call forwards its abort signal and closes its MCP client and transport when the call settles. MCP errors and `isError: true` become tool failures. Successful calls preserve `content` and optional `structuredContent` in the tool result.
+The plugin uses the MCP TypeScript SDK's Streamable HTTP client. The SDK performs initialization and protocol-version negotiation; the plugin then calls `tools/list` and checks that `analyze_image` is available before sending image bytes in `tools/call`. Each tool call forwards its abort signal and closes its MCP client and transport when the call settles. MCP errors and `isError: true` become tool failures. Successful calls preserve `content` and optional `structuredContent` in the tool result.
 
 ## MCP request and result shapes
 

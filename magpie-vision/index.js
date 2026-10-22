@@ -98,7 +98,7 @@ export async function activate(ctx, config) {
     ctx.logger('magpie-vision').warn('magpie-vision: allowInsecureHttp is enabled; if HTTP is used, the bearer credential may be exposed in transit');
   }
   let disposed = false;
-  const activeClients = new Set();
+  const activeClients = new Map();
   const tool = defineTool({
     name: 'analyze_image',
     description: 'Analyze an image file from the current agent workspace with the configured vision service.',
@@ -155,10 +155,15 @@ export async function activate(ctx, config) {
       }, exec.signal);
       if (lstat === undefined) throw new Error(`magpie-vision: image not found: ${args.path}`);
       if (lstat.type !== 'file') throw new Error(`magpie-vision: image path is not a regular file: ${args.path}`);
+      const workspace = await ctx.fs.resolve(cwd, {
+        cwd,
+        signal: exec.signal
+      });
       const target = await ctx.fs.resolve(args.path, {
         cwd,
         signal: exec.signal
       });
+      if (!ctx.fs.contains(workspace, target)) throw new Error('magpie-vision: image path is outside the agent working directory');
       const info = await ctx.fs.stat(target, exec.signal);
       if (info === undefined || info.type !== 'file') throw new Error(`magpie-vision: image not found or not a regular file: ${args.path}`);
       if (info.size !== undefined && info.size > MAX_IMAGE_BYTES) throw new Error('magpie-vision: image exceeds the 20 MiB size limit');
@@ -170,7 +175,12 @@ export async function activate(ctx, config) {
         name: 'dsh-magpie-vision',
         version: '1.0.0'
       });
-      activeClients.add(client);
+      const requestController = new AbortController();
+      const abortRequest = ()=>requestController.abort(exec.signal.reason);
+      exec.signal.addEventListener('abort', abortRequest, {
+        once: true
+      });
+      activeClients.set(client, requestController);
       try {
         await client.connect(new StreamableHTTPClientTransport(endpoint.url, {
           requestInit: {
@@ -179,9 +189,15 @@ export async function activate(ctx, config) {
             }
           }
         }), {
-          signal: exec.signal
+          signal: requestController.signal
         });
-        exec.signal.throwIfAborted();
+        requestController.signal.throwIfAborted();
+        const { tools } = await client.listTools(undefined, {
+          signal: requestController.signal
+        });
+        requestController.signal.throwIfAborted();
+        if (!tools.some((item)=>item.name === 'analyze_image')) throw new Error('MCP server does not provide analyze_image');
+        if (disposed) throw new Error('magpie-vision: plugin is shutting down');
         const result = await client.callTool({
           name: 'analyze_image',
           arguments: {
@@ -191,7 +207,7 @@ export async function activate(ctx, config) {
             }
           }
         }, {
-          signal: exec.signal
+          signal: requestController.signal
         });
         if (result.isError === true) throw new Error(safeError(new Error(textFromResult(result) || 'MCP tool returned isError'), endpoint.token));
         return sanitizeResult({
@@ -204,9 +220,10 @@ export async function activate(ctx, config) {
           }
         }, endpoint.token);
       } catch (error) {
-        if (exec.signal.aborted) throw error;
+        if (requestController.signal.aborted) throw error;
         throw new Error(`magpie-vision: vision request failed: ${safeError(error, endpoint.token)}`);
       } finally{
+        exec.signal.removeEventListener('abort', abortRequest);
         activeClients.delete(client);
         await client.close().catch(()=>{});
       }
@@ -219,7 +236,10 @@ export async function activate(ctx, config) {
       dispose();
       await Promise.all([
         ...activeClients
-      ].map((client)=>client.close().catch(()=>{})));
+      ].map(async ([client, controller])=>{
+        controller.abort(new Error('magpie-vision: plugin is shutting down'));
+        await client.close().catch(()=>{});
+      }));
     };
   }, 'magpie-vision.analyze_image');
 }
