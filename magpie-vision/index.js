@@ -94,11 +94,13 @@ function textFromResult(result) {
 export async function activate(ctx, config) {
   const endpoint = resolveEndpoint(config);
   if (endpoint === undefined) return;
+  const visionEndpoint = endpoint;
   if (config.allowInsecureHttp) {
     ctx.logger('magpie-vision').warn('magpie-vision: allowInsecureHttp is enabled; if HTTP is used, the bearer credential may be exposed in transit');
   }
   let disposed = false;
   const activeClients = new Map();
+  const activeWork = new Set();
   const tool = defineTool({
     name: 'analyze_image',
     description: 'Analyze an image file from the current agent workspace with the configured vision service.',
@@ -145,87 +147,100 @@ export async function activate(ctx, config) {
     },
     async execute (args, exec) {
       if (disposed) throw new Error('magpie-vision: plugin is shutting down');
-      const agent = exec.agent;
-      if (agent === undefined) throw new Error('magpie-vision: analyze_image requires an active agent');
-      const cwd = agent.session.header.cwd;
-      if (!cwd) throw new Error('magpie-vision: active agent has no working directory');
-      if (!args.path.trim()) throw new Error('magpie-vision: path must not be empty');
-      const lstat = await ctx.fs.lstat(args.path, {
-        cwd
-      }, exec.signal);
-      if (lstat === undefined) throw new Error(`magpie-vision: image not found: ${args.path}`);
-      if (lstat.type !== 'file') throw new Error(`magpie-vision: image path is not a regular file: ${args.path}`);
-      const workspace = await ctx.fs.resolve(cwd, {
-        cwd,
-        signal: exec.signal
-      });
-      const target = await ctx.fs.resolve(args.path, {
-        cwd,
-        signal: exec.signal
-      });
-      if (!ctx.fs.contains(workspace, target)) throw new Error('magpie-vision: image path is outside the agent working directory');
-      const info = await ctx.fs.stat(target, exec.signal);
-      if (info === undefined || info.type !== 'file') throw new Error(`magpie-vision: image not found or not a regular file: ${args.path}`);
-      if (info.size !== undefined && info.size > MAX_IMAGE_BYTES) throw new Error('magpie-vision: image exceeds the 20 MiB size limit');
-      const bytes = await ctx.fs.readBytes(target, exec.signal, MAX_IMAGE_BYTES);
-      exec.signal.throwIfAborted();
-      const image = imageData(args.path, bytes);
-      if (disposed) throw new Error('magpie-vision: plugin is shutting down');
-      const client = new Client({
-        name: 'dsh-magpie-vision',
-        version: '1.0.0'
-      });
-      const requestController = new AbortController();
-      const abortRequest = ()=>requestController.abort(exec.signal.reason);
-      exec.signal.addEventListener('abort', abortRequest, {
+      const workController = new AbortController();
+      const abortWork = ()=>workController.abort(exec.signal.reason);
+      if (exec.signal.aborted) abortWork();
+      else exec.signal.addEventListener('abort', abortWork, {
         once: true
       });
-      activeClients.set(client, requestController);
+      activeWork.add(workController);
       try {
-        await client.connect(new StreamableHTTPClientTransport(endpoint.url, {
-          requestInit: {
-            headers: {
-              Authorization: `Bearer ${endpoint.token}`
-            }
-          }
-        }), {
-          signal: requestController.signal
-        });
-        requestController.signal.throwIfAborted();
-        const { tools } = await client.listTools(undefined, {
-          signal: requestController.signal
-        });
-        requestController.signal.throwIfAborted();
-        if (!tools.some((item)=>item.name === 'analyze_image')) throw new Error('MCP server does not provide analyze_image');
-        if (disposed) throw new Error('magpie-vision: plugin is shutting down');
-        const result = await client.callTool({
-          name: 'analyze_image',
-          arguments: {
-            image,
-            ...args.prompt === undefined ? {} : {
-              prompt: args.prompt
-            }
-          }
-        }, {
-          signal: requestController.signal
-        });
-        if (result.isError === true) throw new Error(safeError(new Error(textFromResult(result) || 'MCP tool returned isError'), endpoint.token));
-        return sanitizeResult({
-          content: jsonArray(result.content),
-          ...result.structuredContent === undefined ? {} : {
-            structuredContent: jsonValue(result.structuredContent)
-          },
-          ...result.isError === undefined ? {} : {
-            isError: result.isError
-          }
-        }, endpoint.token);
+        return await run(workController.signal);
       } catch (error) {
-        if (requestController.signal.aborted) throw error;
-        throw new Error(`magpie-vision: vision request failed: ${safeError(error, endpoint.token)}`);
+        if (workController.signal.aborted) throw new Error(`magpie-vision: request cancelled: ${safeError(error, visionEndpoint.token)}`);
+        throw error;
       } finally{
-        exec.signal.removeEventListener('abort', abortRequest);
-        activeClients.delete(client);
-        await client.close().catch(()=>{});
+        exec.signal.removeEventListener('abort', abortWork);
+        activeWork.delete(workController);
+      }
+      async function run(signal) {
+        const agent = exec.agent;
+        if (agent === undefined) throw new Error('magpie-vision: analyze_image requires an active agent');
+        const cwd = agent.session.header.cwd;
+        if (!cwd) throw new Error('magpie-vision: active agent has no working directory');
+        if (!args.path.trim()) throw new Error('magpie-vision: path must not be empty');
+        const lstat = await ctx.fs.lstat(args.path, {
+          cwd
+        }, signal);
+        if (lstat === undefined) throw new Error(`magpie-vision: image not found: ${args.path}`);
+        if (lstat.type !== 'file') throw new Error(`magpie-vision: image path is not a regular file: ${args.path}`);
+        const workspace = await ctx.fs.resolve(cwd, {
+          cwd,
+          signal
+        });
+        const target = await ctx.fs.resolve(args.path, {
+          cwd,
+          signal
+        });
+        if (!ctx.fs.contains(workspace, target)) throw new Error('magpie-vision: image path is outside the agent working directory');
+        const info = await ctx.fs.stat(target, signal);
+        if (info === undefined || info.type !== 'file') throw new Error(`magpie-vision: image not found or not a regular file: ${args.path}`);
+        if (info.size !== undefined && info.size > MAX_IMAGE_BYTES) throw new Error('magpie-vision: image exceeds the 20 MiB size limit');
+        // shortcut: ctx.fs has no stable-handle byte read; upgrade when it can no-follow and read atomically.
+        const bytes = await ctx.fs.readBytes(target, signal, MAX_IMAGE_BYTES);
+        signal.throwIfAborted();
+        const image = imageData(args.path, bytes);
+        if (disposed) throw new Error('magpie-vision: plugin is shutting down');
+        const client = new Client({
+          name: 'dsh-magpie-vision',
+          version: '1.0.0'
+        });
+        activeClients.set(client, workController);
+        try {
+          await client.connect(new StreamableHTTPClientTransport(visionEndpoint.url, {
+            requestInit: {
+              headers: {
+                Authorization: `Bearer ${visionEndpoint.token}`
+              }
+            }
+          }), {
+            signal
+          });
+          signal.throwIfAborted();
+          const { tools } = await client.listTools(undefined, {
+            signal
+          });
+          signal.throwIfAborted();
+          if (!tools.some((item)=>item.name === 'analyze_image')) throw new Error('MCP server does not provide analyze_image');
+          if (disposed) throw new Error('magpie-vision: plugin is shutting down');
+          const result = await client.callTool({
+            name: 'analyze_image',
+            arguments: {
+              image,
+              ...args.prompt === undefined ? {} : {
+                prompt: args.prompt
+              }
+            }
+          }, {
+            signal
+          });
+          if (result.isError === true) throw new Error(safeError(new Error(textFromResult(result) || 'MCP tool returned isError'), visionEndpoint.token));
+          return sanitizeResult({
+            content: jsonArray(result.content),
+            ...result.structuredContent === undefined ? {} : {
+              structuredContent: jsonValue(result.structuredContent)
+            },
+            ...result.isError === undefined ? {} : {
+              isError: result.isError
+            }
+          }, visionEndpoint.token);
+        } catch (error) {
+          if (signal.aborted) throw error;
+          throw new Error(`magpie-vision: vision request failed: ${safeError(error, visionEndpoint.token)}`);
+        } finally{
+          activeClients.delete(client);
+          await client.close().catch(()=>{});
+        }
       }
     }
   });
@@ -234,12 +249,10 @@ export async function activate(ctx, config) {
     return async ()=>{
       disposed = true;
       dispose();
+      for (const controller of activeWork)controller.abort(new Error('magpie-vision: plugin is shutting down'));
       await Promise.all([
         ...activeClients
-      ].map(async ([client, controller])=>{
-        controller.abort(new Error('magpie-vision: plugin is shutting down'));
-        await client.close().catch(()=>{});
-      }));
+      ].map(async ([client])=>client.close().catch(()=>{})));
     };
   }, 'magpie-vision.analyze_image');
 }

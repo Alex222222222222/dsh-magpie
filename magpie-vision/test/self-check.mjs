@@ -26,7 +26,12 @@ async function mockMcpServer(options = {}) {
     methods.push(message.method);
     requests.push({ headers: request.headers, message });
     if (message.method === 'notifications/initialized') { response.writeHead(202).end(); return; }
-    if (options.httpFailMethod === message.method) { response.writeHead(500, { 'content-type': 'text/plain' }).end(options.errorBody ?? 'mock failure'); return; }
+    if (options.httpFailMethod === message.method) {
+      markCallStarted();
+      if (options.delayHttpFailure) await heldCall;
+      response.writeHead(500, { 'content-type': 'text/plain' }).end(options.errorBody ?? 'mock failure');
+      return;
+    }
     if (options.failMethod === message.method) {
       response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ jsonrpc: '2.0', id: message.id, error: { code: -32000, message: options.errorBody ?? 'mock failure' } }));
       return;
@@ -318,8 +323,11 @@ test('cancellation aborts an in-flight MCP call and releases its client', async 
     const controller = new AbortController();
     const pending = tool.execute({ path: 'photo.png' }, { agent: { session: { header: { cwd: '/workspace' } } }, signal: controller.signal });
     await mock.callStarted;
-    controller.abort(new Error('test cancellation'));
-    await assert.rejects(pending, /test cancellation|abort/i);
+    controller.abort(new Error('local-mock-token test cancellation'));
+    const cancellation = await pending.then(() => undefined, (error) => error);
+    assert.ok(cancellation instanceof Error);
+    assert.match(cancellation.message, /\[redacted\].*test cancellation/);
+    assert.doesNotMatch(cancellation.message, /local-mock-token/);
     await ctx.cleanup();
     mock.releaseCall();
   } finally {
@@ -346,6 +354,75 @@ test('plugin cleanup aborts and closes an active MCP client', async () => {
     await cleanup;
     mock.releaseCall();
     assert.deepEqual(mock.methods, ['initialize', 'notifications/initialized', 'tools/list', 'tools/call']);
+  } finally {
+    if (ctx?.cleanup) await ctx.cleanup();
+    mock.releaseCall();
+    await mock.close();
+    if (previous === undefined) delete process.env.MAGPIE_VISION_SELF_CHECK;
+    else process.env.MAGPIE_VISION_SELF_CHECK = previous;
+  }
+});
+
+test('plugin cleanup aborts a filesystem read already in progress', async () => {
+  const previous = process.env.MAGPIE_VISION_SELF_CHECK;
+  process.env.MAGPIE_VISION_SELF_CHECK = 'local-mock-token';
+  let markReadStarted;
+  const readStarted = new Promise((resolve) => { markReadStarted = resolve; });
+  let releaseRead;
+  let readAborted = false;
+  let tool;
+  const ctx = context((registered) => { tool = registered; });
+  ctx.fs = {
+    async lstat() { return { type: 'file' }; },
+    async resolve(path, { cwd }) {
+      const displayPath = pathModule.resolve(path.startsWith('/') ? path : `${cwd}/${path}`);
+      return { targetKey: displayPath, displayPath };
+    },
+    contains(parent, child) { return child.displayPath.startsWith(`${parent.displayPath}/`); },
+    async stat() { return { type: 'file', size: 8 }; },
+    readBytes(_target, signal) {
+      markReadStarted();
+      return new Promise((resolve, reject) => {
+        releaseRead = () => resolve(Uint8Array.of(137, 80, 78, 71, 13, 10, 26, 10));
+        signal.addEventListener('abort', () => { readAborted = true; reject(signal.reason); }, { once: true });
+      });
+    }
+  };
+  const controller = new AbortController();
+  let pending;
+  try {
+    await activate(ctx, { enabled: true, endpointUrl: 'http://127.0.0.1:1/mcp', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: true });
+    pending = tool.execute({ path: 'photo.png' }, { agent: { session: { header: { cwd: '/workspace' } } }, signal: controller.signal });
+    await readStarted;
+    await ctx.cleanup();
+    assert.equal(readAborted, true);
+    await assert.rejects(pending, /shutting down|abort|cancel/i);
+  } finally {
+    controller.abort(new Error('test cleanup'));
+    releaseRead?.();
+    if (pending) await pending.catch(() => {});
+    if (ctx.cleanup) await ctx.cleanup();
+    if (previous === undefined) delete process.env.MAGPIE_VISION_SELF_CHECK;
+    else process.env.MAGPIE_VISION_SELF_CHECK = previous;
+  }
+});
+
+test('cancellation redacts a transport failure racing with abort', async () => {
+  const previous = process.env.MAGPIE_VISION_SELF_CHECK;
+  process.env.MAGPIE_VISION_SELF_CHECK = 'local-mock-token';
+  const mock = await mockMcpServer({ httpFailMethod: 'tools/call', delayHttpFailure: true, errorBody: 'local-mock-token server rejection' });
+  let ctx;
+  let tool;
+  try {
+    ({ ctx, tool } = await setupMcpInvocation(mock));
+    const controller = new AbortController();
+    const pending = tool.execute({ path: 'photo.png' }, { agent: { session: { header: { cwd: '/workspace' } } }, signal: controller.signal });
+    await mock.callStarted;
+    mock.releaseCall();
+    controller.abort(new Error('local-mock-token cancellation raced with HTTP failure'));
+    const error = await pending.then(() => undefined, (failure) => failure);
+    assert.ok(error instanceof Error);
+    assert.doesNotMatch(error.message, /local-mock-token/);
   } finally {
     if (ctx?.cleanup) await ctx.cleanup();
     mock.releaseCall();
