@@ -31,7 +31,7 @@ export const inject = [
   'tools',
   'fs'
 ];
-export const name = 'magpie-vision';
+export const name = 'magpie';
 export function imageData(_path, bytes) {
   if (bytes.byteLength > MAX_IMAGE_BYTES) throw new Error('Image exceeds the 20 MiB size limit');
   const mimeType = imageMimeType(bytes);
@@ -40,27 +40,27 @@ export function imageData(_path, bytes) {
 }
 function resolveEndpoint(config) {
   if (!config.enabled) return undefined;
-  if (!config.endpointUrl?.trim()) throw new Error('magpie-vision: endpointUrl is required when enabled');
-  if (!config.tokenEnv.trim()) throw new Error('magpie-vision: tokenEnv must name a non-empty environment variable');
+  if (!config.endpointUrl?.trim()) throw new Error('magpie: endpointUrl is required when enabled');
+  if (!config.tokenEnv.trim()) throw new Error('magpie: tokenEnv must name a non-empty environment variable');
   let url;
   try {
     url = new URL(config.endpointUrl);
   } catch  {
-    throw new Error('magpie-vision: endpointUrl must be an absolute HTTP or HTTPS URL');
+    throw new Error('magpie: endpointUrl must be an absolute HTTP or HTTPS URL');
   }
   if (url.protocol !== 'https:' && url.protocol !== 'http:') {
-    throw new Error('magpie-vision: endpointUrl must use http or https');
+    throw new Error('magpie: endpointUrl must use http or https');
   }
   const authority = config.endpointUrl.match(/^https?:\/\/([^/?#]*)/i)?.[1];
-  if (authority === undefined) throw new Error('magpie-vision: endpointUrl must be an absolute HTTP or HTTPS URL');
+  if (authority === undefined) throw new Error('magpie: endpointUrl must be an absolute HTTP or HTTPS URL');
   if (url.username || url.password || authority.includes('@')) {
-    throw new Error('magpie-vision: endpointUrl must not contain credentials');
+    throw new Error('magpie: endpointUrl must not contain credentials');
   }
   if (url.protocol === 'http:' && !config.allowInsecureHttp) {
-    throw new Error('magpie-vision: HTTPS is required; set allowInsecureHttp: true to permit HTTP');
+    throw new Error('magpie: HTTPS is required; set allowInsecureHttp: true to permit HTTP');
   }
   const token = process.env[config.tokenEnv];
-  if (!token) throw new Error(`magpie-vision: environment variable ${config.tokenEnv} is not set or empty`);
+  if (!token) throw new Error(`magpie: environment variable ${config.tokenEnv} is not set or empty`);
   return {
     url,
     token
@@ -96,7 +96,7 @@ export async function activate(ctx, config) {
   if (endpoint === undefined) return;
   const visionEndpoint = endpoint;
   if (config.allowInsecureHttp) {
-    ctx.logger('magpie-vision').warn('magpie-vision: allowInsecureHttp is enabled; if HTTP is used, the bearer credential may be exposed in transit');
+    ctx.logger('magpie').warn('magpie: allowInsecureHttp is enabled; if HTTP is used, the bearer credential may be exposed in transit');
   }
   let disposed = false;
   const activeClients = new Map();
@@ -146,7 +146,7 @@ export async function activate(ctx, config) {
       }
     },
     async execute (args, exec) {
-      if (disposed) throw new Error('magpie-vision: plugin is shutting down');
+      if (disposed) throw new Error('magpie: plugin is shutting down');
       const workController = new AbortController();
       const abortWork = ()=>workController.abort(exec.signal.reason);
       if (exec.signal.aborted) abortWork();
@@ -157,7 +157,7 @@ export async function activate(ctx, config) {
       try {
         return await run(workController.signal);
       } catch (error) {
-        if (workController.signal.aborted) throw new Error(`magpie-vision: request cancelled: ${safeError(error, visionEndpoint.token)}`);
+        if (workController.signal.aborted) throw new Error(`magpie: request cancelled: ${safeError(error, visionEndpoint.token)}`);
         throw error;
       } finally{
         exec.signal.removeEventListener('abort', abortWork);
@@ -165,15 +165,15 @@ export async function activate(ctx, config) {
       }
       async function run(signal) {
         const agent = exec.agent;
-        if (agent === undefined) throw new Error('magpie-vision: analyze_image requires an active agent');
+        if (agent === undefined) throw new Error('magpie: analyze_image requires an active agent');
         const cwd = agent.session.header.cwd;
-        if (!cwd) throw new Error('magpie-vision: active agent has no working directory');
-        if (!args.path.trim()) throw new Error('magpie-vision: path must not be empty');
+        if (!cwd) throw new Error('magpie: active agent has no working directory');
+        if (!args.path.trim()) throw new Error('magpie: path must not be empty');
         const lstat = await ctx.fs.lstat(args.path, {
           cwd
         }, signal);
-        if (lstat === undefined) throw new Error(`magpie-vision: image not found: ${args.path}`);
-        if (lstat.type !== 'file') throw new Error(`magpie-vision: image path is not a regular file: ${args.path}`);
+        if (lstat === undefined) throw new Error(`magpie: image not found: ${args.path}`);
+        if (lstat.type !== 'file') throw new Error(`magpie: image path is not a regular file: ${args.path}`);
         const workspace = await ctx.fs.resolve(cwd, {
           cwd,
           signal
@@ -182,17 +182,17 @@ export async function activate(ctx, config) {
           cwd,
           signal
         });
-        if (!ctx.fs.contains(workspace, target)) throw new Error('magpie-vision: image path is outside the agent working directory');
+        if (!ctx.fs.contains(workspace, target)) throw new Error('magpie: image path is outside the agent working directory');
         const info = await ctx.fs.stat(target, signal);
-        if (info === undefined || info.type !== 'file') throw new Error(`magpie-vision: image not found or not a regular file: ${args.path}`);
-        if (info.size !== undefined && info.size > MAX_IMAGE_BYTES) throw new Error('magpie-vision: image exceeds the 20 MiB size limit');
+        if (info === undefined || info.type !== 'file') throw new Error(`magpie: image not found or not a regular file: ${args.path}`);
+        if (info.size !== undefined && info.size > MAX_IMAGE_BYTES) throw new Error('magpie: image exceeds the 20 MiB size limit');
         // shortcut: ctx.fs has no stable-handle byte read; upgrade when it can no-follow and read atomically.
         const bytes = await ctx.fs.readBytes(target, signal, MAX_IMAGE_BYTES);
         signal.throwIfAborted();
         const image = imageData(args.path, bytes);
-        if (disposed) throw new Error('magpie-vision: plugin is shutting down');
+        if (disposed) throw new Error('magpie: plugin is shutting down');
         const client = new Client({
-          name: 'dsh-magpie-vision',
+          name: 'dsh-magpie',
           version: '1.0.0'
         });
         activeClients.set(client, workController);
@@ -212,7 +212,7 @@ export async function activate(ctx, config) {
           });
           signal.throwIfAborted();
           if (!tools.some((item)=>item.name === 'analyze_image')) throw new Error('MCP server does not provide analyze_image');
-          if (disposed) throw new Error('magpie-vision: plugin is shutting down');
+          if (disposed) throw new Error('magpie: plugin is shutting down');
           const result = await client.callTool({
             name: 'analyze_image',
             arguments: {
@@ -236,7 +236,7 @@ export async function activate(ctx, config) {
           }, visionEndpoint.token);
         } catch (error) {
           if (signal.aborted) throw error;
-          throw new Error(`magpie-vision: vision request failed: ${safeError(error, visionEndpoint.token)}`);
+          throw new Error(`magpie: vision request failed: ${safeError(error, visionEndpoint.token)}`);
         } finally{
           activeClients.delete(client);
           await client.close().catch(()=>{});
@@ -249,11 +249,11 @@ export async function activate(ctx, config) {
     return async ()=>{
       disposed = true;
       dispose();
-      for (const controller of activeWork)controller.abort(new Error('magpie-vision: plugin is shutting down'));
+      for (const controller of activeWork)controller.abort(new Error('magpie: plugin is shutting down'));
       await Promise.all([
         ...activeClients
       ].map(async ([client])=>client.close().catch(()=>{})));
     };
-  }, 'magpie-vision.analyze_image');
+  }, 'magpie.analyze_image');
 }
 export const apply = activate;

@@ -255,6 +255,7 @@ test('MCP call discovers the tool, sends the image with bearer auth, and preserv
     const result = await tool.execute({ path: 'photo.png', prompt: 'read its label' }, exec);
     const toolCall = mock.requests.find(({ message }) => message.method === 'tools/call');
     assert.deepEqual(mock.methods, ['initialize', 'notifications/initialized', 'tools/list', 'tools/call']);
+    assert.equal(mock.requests.find(({ message }) => message.method === 'initialize').message.params.clientInfo.name, 'dsh-magpie');
     assert.equal(toolCall.headers.authorization, 'Bearer local-mock-token');
     assert.deepEqual(toolCall.message.params.arguments, { image: 'data:image/png;base64,iVBORw0KGgo=', prompt: 'read its label' });
     assert.deepEqual(result, { content: [{ type: 'text', text: 'mock image result' }], structuredContent: { label: 'test' } });

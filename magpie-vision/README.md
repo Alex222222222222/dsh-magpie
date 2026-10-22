@@ -1,10 +1,10 @@
-# Magpie Vision
+# Magpie
 
 A DSH Host bundle that registers `analyze_image`, reads one image from the active agent's workspace, and sends it to a configurable remote MCP vision server.
 
 ## Configuration
 
-The bundle's `magpie-vision` row accepts:
+The bundle's `magpie` row uses the package `@alex222222222222/magpie` and accepts:
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
@@ -30,7 +30,7 @@ The plugin uses the MCP TypeScript SDK's Streamable HTTP client. The SDK perform
 These illustrative JSON-RPC messages show the exchange. Request IDs and the `initialize` protocol version are examples; the SDK negotiates the version with the server.
 
 ```json
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"dsh-magpie-vision","version":"1.0.0"}}}
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"dsh-magpie","version":"1.0.0"}}}
 {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
 {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"analyze_image","arguments":{"image":"data:image/png;base64,<BASE64>","prompt":"<optional prompt>"}}}
 ```

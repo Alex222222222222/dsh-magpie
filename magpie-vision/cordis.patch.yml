@@ -1,6 +1,6 @@
 - insert:
-    - id: magpie-vision
-      name: '@local/magpie-vision'
+    - id: magpie
+      name: '@alex222222222222/magpie'
       config:
         enabled: true
         tokenEnv: MAGPIE_VISION_TOKEN
