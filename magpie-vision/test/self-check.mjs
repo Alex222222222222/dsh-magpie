@@ -90,13 +90,20 @@ async function setupMcpInvocation(mock) {
   return { ctx, tool, exec: { agent: { session: { header: { cwd: '/workspace' } } }, signal: new AbortController().signal } };
 }
 
-test('Config applies documented defaults and keeps the gateway optional', () => {
-  assert.deepEqual(Config({}), {
+const readConfig = (config) => Object.fromEntries(Object.entries(config).map(([key, value]) => [key, typeof value?.get === 'function' ? value.get() : value]));
+
+test('Config applies documented defaults as live references the settings page can edit', () => {
+  const config = Config({});
+  assert.deepEqual(readConfig(config), {
     enabled: true,
     instructionMode: 'normal',
+    gatewayUrl: undefined,
     tokenEnv: 'MAGPIE_API_KEY',
     allowInsecureHttp: false
   });
+  for (const field of ['instructionMode', 'gatewayUrl', 'tokenEnv', 'allowInsecureHttp']) {
+    assert.equal(typeof config[field]?.get, 'function', `${field} must be volatile so the settings page can edit it`);
+  }
 });
 
 test('the vision MCP endpoint is derived from the gateway URL', () => {
@@ -106,13 +113,23 @@ test('the vision MCP endpoint is derived from the gateway URL', () => {
   assert.equal(visionEndpoint('  https://example.com  '), 'https://example.com/mcp/magpie/vision');
 });
 
-test('normal instruction mode registers no system prompt', async () => {
+test('normal mode contributes no text and a live mode change applies without restart', async () => {
   const previous = process.env.MAGPIE_VISION_SELF_CHECK;
   process.env.MAGPIE_VISION_SELF_CHECK = 'self-check-token';
   try {
+    let mode = 'normal';
     const ctx = context();
-    await activate(ctx, { enabled: true, instructionMode: 'normal', gatewayUrl: 'https://vision.example/', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: false });
-    assert.equal(ctx.sections.size, 0);
+    await activate(ctx, {
+      enabled: true,
+      instructionMode: { get: () => mode },
+      gatewayUrl: 'https://vision.example/',
+      tokenEnv: 'MAGPIE_VISION_SELF_CHECK',
+      allowInsecureHttp: false
+    });
+    const section = ctx.sections.get('magpie:instructions');
+    assert.equal(section.text({ scope: {} }), '');
+    mode = 'force';
+    assert.match(section.text({ scope: {} }), /You MUST use analyze_image/);
     await ctx.cleanup();
   } finally {
     if (previous === undefined) delete process.env.MAGPIE_VISION_SELF_CHECK;
@@ -312,6 +329,46 @@ test('tool discovery verifies analyze_image before transmitting image bytes', as
   } finally {
     await ctx.cleanup();
     await mock.close();
+    if (previous === undefined) delete process.env.MAGPIE_VISION_SELF_CHECK;
+    else process.env.MAGPIE_VISION_SELF_CHECK = previous;
+  }
+});
+
+test('a settings write to the gateway applies to the next call without restart', async () => {
+  const previous = process.env.MAGPIE_VISION_SELF_CHECK;
+  process.env.MAGPIE_VISION_SELF_CHECK = 'live-token';
+  const first = await mockMcpServer();
+  const second = await mockMcpServer();
+  let ctx;
+  let tool;
+  let gatewayUrl = first.gatewayUrl;
+  try {
+    const fs = {
+      async lstat() { return { type: 'file' }; },
+      async resolve(path) { const displayPath = pathModule.resolve(path); return { targetKey: displayPath, displayPath }; },
+      contains(parent, child) { return child.displayPath.startsWith(parent.displayPath); },
+      async stat() { return { type: 'file', size: 8 }; },
+      async readBytes() { return Uint8Array.of(137, 80, 78, 71, 13, 10, 26, 10); }
+    };
+    ctx = context((registered) => { tool = registered; });
+    ctx.fs = fs;
+    await activate(ctx, {
+      enabled: true,
+      gatewayUrl: { get: () => gatewayUrl },
+      tokenEnv: 'MAGPIE_VISION_SELF_CHECK',
+      allowInsecureHttp: true
+    });
+    const exec = { agent: { session: { header: { cwd: '/workspace' } } }, signal: new AbortController().signal };
+    await tool.execute({ path: '/workspace/photo.png' }, exec);
+    assert.deepEqual(first.methods, ['initialize', 'notifications/initialized', 'tools/list', 'tools/call']);
+    assert.deepEqual(second.methods, []);
+    gatewayUrl = second.gatewayUrl;
+    await tool.execute({ path: '/workspace/photo.png' }, exec);
+    assert.deepEqual(second.methods, ['initialize', 'notifications/initialized', 'tools/list', 'tools/call']);
+  } finally {
+    if (ctx?.cleanup) await ctx.cleanup();
+    await first.close();
+    await second.close();
     if (previous === undefined) delete process.env.MAGPIE_VISION_SELF_CHECK;
     else process.env.MAGPIE_VISION_SELF_CHECK = previous;
   }

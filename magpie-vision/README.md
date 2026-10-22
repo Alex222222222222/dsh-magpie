@@ -18,6 +18,15 @@ HTTPS is required by default. Setting `allowInsecureHttp: true` permits HTTP and
 
 The gateway URL is intentionally not preconfigured. The MCP endpoint is `<gatewayUrl>/mcp/magpie/vision`: trailing slashes are removed and a gateway path prefix, such as `https://example.com/gateway`, is preserved. When enabled, activation reports a missing gateway separately from a missing or empty token environment variable.
 
+### Web UI configuration
+
+Settings can be managed directly in the DSH Web UI without editing YAML files manually:
+1. Open **Plugins** in the left sidebar.
+2. Click **Magpie** (`@alex222222222222/magpie`).
+3. Click **Configure** on the `magpie` row.
+
+The panel provides staged editing with validation for `gatewayUrl`, `tokenEnv`, `instructionMode`, and `allowInsecureHttp`. Saving writes changes directly through the DSH settings service into the active profile's configuration, and updates apply immediately to subsequent tool calls and system prompts without restarting the host.
+
 ## Agent instructions
 
 `instructionMode` selects whether the bundle adds guidance to the agent's system prompt:

@@ -8,16 +8,29 @@
     "type": "git",
     "url": "https://github.com/Alex222222222222/dsh-magpie.git"
   },
-  "exports": { ".": "./magpie-vision/index.js" },
+  "exports": {
+    ".": "./magpie-vision/index.js",
+    "./client": "./magpie-vision/client.js"
+  },
   "files": [
     "magpie-vision/index.js",
+    "magpie-vision/client.js",
     "magpie-vision/cordis.patch.yml",
     "magpie-vision/README.md"
   ],
   "scripts": {
-    "test": "node --test magpie-vision/test/self-check.mjs"
+    "test": "node --test magpie-vision/test/self-check.mjs magpie-vision/test/client-check.mjs"
   },
-  "dsh": { "bundle": { "patch": "./magpie-vision/cordis.patch.yml" } },
+  "dsh": {
+    "bundle": { "patch": "./magpie-vision/cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ]
+    }
+  },
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.0.4",
     "@deepseek-ai/dsh-fs": "0.2.0-rc.2",

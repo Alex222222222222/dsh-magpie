@@ -27,10 +27,10 @@ export const Config = z.object({
     z.const('normal'),
     z.const('suggest'),
     z.const('force')
-  ]).default('normal'),
-  gatewayUrl: z.string().required(false),
-  tokenEnv: z.string().default('MAGPIE_API_KEY'),
-  allowInsecureHttp: z.boolean().default(false)
+  ]).default('normal').volatile(),
+  gatewayUrl: z.string().required(false).volatile(),
+  tokenEnv: z.string().default('MAGPIE_API_KEY').volatile(),
+  allowInsecureHttp: z.boolean().default(false).volatile()
 });
 export const inject = [
   'tools',
@@ -43,6 +43,11 @@ const INSTRUCTIONS = {
   suggest: 'When you need to inspect or recognize an image, prefer the analyze_image tool. Do not claim to have inspected an image unless analyze_image succeeds.',
   force: 'You MUST use analyze_image whenever the task requires inspecting or recognizing an image. Do not answer from an unseen or assumed image; report analyze_image failures honestly.'
 };
+// Settings edits reach a volatile field through a live reference; plain values still load from YAML.
+function read(value) {
+  if (typeof value?.get !== 'function') return value;
+  return value.get();
+}
 export function imageData(_path, bytes) {
   if (bytes.byteLength > MAX_IMAGE_BYTES) throw new Error('Image exceeds the 20 MiB size limit');
   const mimeType = imageMimeType(bytes);
@@ -55,9 +60,11 @@ export function visionEndpoint(gatewayUrl) {
 }
 function resolveEndpoint(config) {
   if (!config.enabled) return undefined;
-  if (!config.gatewayUrl?.trim()) throw new Error('magpie: gatewayUrl is required when enabled');
-  if (!config.tokenEnv.trim()) throw new Error('magpie: tokenEnv must name a non-empty environment variable');
-  const endpoint = visionEndpoint(config.gatewayUrl);
+  const gatewayUrl = read(config.gatewayUrl);
+  const tokenEnv = read(config.tokenEnv);
+  if (!gatewayUrl?.trim()) throw new Error('magpie: gatewayUrl is required when enabled');
+  if (!tokenEnv?.trim()) throw new Error('magpie: tokenEnv must name a non-empty environment variable');
+  const endpoint = visionEndpoint(gatewayUrl);
   let url;
   try {
     url = new URL(endpoint);
@@ -72,11 +79,11 @@ function resolveEndpoint(config) {
   if (url.username || url.password || authority.includes('@')) {
     throw new Error('magpie: gatewayUrl must not contain credentials');
   }
-  if (url.protocol === 'http:' && !config.allowInsecureHttp) {
+  if (url.protocol === 'http:' && !read(config.allowInsecureHttp)) {
     throw new Error('magpie: HTTPS is required; set allowInsecureHttp: true to permit HTTP');
   }
-  const token = process.env[config.tokenEnv];
-  if (!token) throw new Error(`magpie: environment variable ${config.tokenEnv} is not set or empty`);
+  const token = process.env[tokenEnv];
+  if (!token) throw new Error(`magpie: environment variable ${tokenEnv} is not set or empty`);
   return {
     url,
     token
@@ -108,18 +115,17 @@ function textFromResult(result) {
   return result.content.filter((block)=>block.type === 'text' && typeof block.text === 'string').map((block)=>block.text).join('\n');
 }
 export async function activate(ctx, config) {
-  const instructionMode = config.instructionMode ?? 'normal';
-  if (config.enabled && instructionMode !== 'normal') {
-    ctx.systemPrompt.section({
-      name: 'magpie:instructions',
-      order: 3050,
-      text: ({ scope })=>ctx.tools.get('analyze_image', scope) === undefined ? '' : INSTRUCTIONS[instructionMode]
-    });
-  }
   const endpoint = resolveEndpoint(config);
   if (endpoint === undefined) return;
-  const visionEndpoint = endpoint;
-  if (config.allowInsecureHttp) {
+  ctx.systemPrompt.section({
+    name: 'magpie:instructions',
+    order: 3050,
+    text: ({ scope })=>{
+      const mode = read(config.instructionMode) ?? 'normal';
+      return mode === 'normal' || ctx.tools.get('analyze_image', scope) === undefined ? '' : INSTRUCTIONS[mode];
+    }
+  });
+  if (read(config.allowInsecureHttp)) {
     ctx.logger('magpie').warn('magpie: allowInsecureHttp is enabled; if HTTP is used, the bearer credential may be exposed in transit');
   }
   let disposed = false;
@@ -178,16 +184,21 @@ export async function activate(ctx, config) {
         once: true
       });
       activeWork.add(workController);
+      let token;
       try {
         return await run(workController.signal);
       } catch (error) {
-        if (workController.signal.aborted) throw new Error(`magpie: request cancelled: ${safeError(error, visionEndpoint.token)}`);
+        if (workController.signal.aborted) throw new Error(`magpie: request cancelled: ${safeError(error, token ?? '')}`);
         throw error;
       } finally{
         exec.signal.removeEventListener('abort', abortWork);
         activeWork.delete(workController);
       }
       async function run(signal) {
+        // Resolved per call so a settings edit applies without restarting the host.
+        const visionEndpoint = resolveEndpoint(config);
+        if (visionEndpoint === undefined) throw new Error('magpie: plugin is disabled');
+        token = visionEndpoint.token;
         const agent = exec.agent;
         if (agent === undefined) throw new Error('magpie: analyze_image requires an active agent');
         const cwd = agent.session.header.cwd;
