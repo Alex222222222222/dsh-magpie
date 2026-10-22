@@ -1,0 +1,7 @@
+- insert:
+    - id: magpie-vision
+      name: '@local/magpie-vision'
+      config:
+        enabled: true
+        tokenEnv: MAGPIE_VISION_TOKEN
+        allowInsecureHttp: false
