@@ -126,8 +126,7 @@ function textFromResult(result: { content: Array<Record<string, unknown>> }): st
 }
 
 export async function activate(ctx: PluginContext, config: VisionConfig): Promise<void> {
-  const endpoint = resolveEndpoint(config);
-  if (endpoint === undefined) return;
+  if (!config.enabled) return;
   ctx.systemPrompt.section({
     name: 'magpie:instructions',
     order: 3050,

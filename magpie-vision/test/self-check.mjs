@@ -90,6 +90,20 @@ async function setupMcpInvocation(mock) {
   return { ctx, tool, exec: { agent: { session: { header: { cwd: '/workspace' } } }, signal: new AbortController().signal } };
 }
 
+async function assertToolConfigError(config, pattern) {
+  let tool;
+  const ctx = context((registered) => { tool = registered; });
+  await activate(ctx, config);
+  try {
+    await assert.rejects(
+      tool.execute({ path: 'photo.png' }, { signal: new AbortController().signal }),
+      pattern
+    );
+  } finally {
+    await ctx.cleanup();
+  }
+}
+
 const readConfig = (config) => Object.fromEntries(Object.entries(config).map(([key, value]) => [key, typeof value?.get === 'function' ? value.get() : value]));
 
 test('Config applies documented defaults as live references the settings page can edit', () => {
@@ -178,23 +192,29 @@ test('disabled configuration skips validation and tool registration', async () =
   assert.equal(registered, false);
 });
 
-test('enabled configuration reports a missing gateway', async () => {
+test('blank gateway configuration activates and reports the missing URL only when the tool is called', async () => {
+  let tool;
+  const ctx = context((registered) => { tool = registered; });
+  await activate(ctx, Config({}));
+  assert.equal(tool.name, 'analyze_image');
+  assert.ok(ctx.sections.has('magpie:instructions'));
   await assert.rejects(
-    activate({}, { enabled: true, tokenEnv: 'MAGPIE_API_KEY', allowInsecureHttp: false }),
+    tool.execute({ path: 'photo.png' }, { signal: new AbortController().signal }),
     /gatewayUrl is required/
   );
+  await ctx.cleanup();
 });
 
-test('enabled configuration reports the configured missing token', async () => {
+test('enabled configuration reports a missing token when the tool is called', async () => {
   const previous = process.env.MAGPIE_VISION_SELF_CHECK;
   delete process.env.MAGPIE_VISION_SELF_CHECK;
   try {
-    await assert.rejects(
-      activate({}, { enabled: true, gatewayUrl: 'https://vision.example/', tokenEnv: ' ', allowInsecureHttp: false }),
+    await assertToolConfigError(
+      { enabled: true, gatewayUrl: 'https://vision.example/', tokenEnv: ' ', allowInsecureHttp: false },
       /tokenEnv must name/
     );
-    await assert.rejects(
-      activate({}, { enabled: true, gatewayUrl: 'https://vision.example/', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: false }),
+    await assertToolConfigError(
+      { enabled: true, gatewayUrl: 'https://vision.example/', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: false },
       /MAGPIE_VISION_SELF_CHECK.*not set/
     );
   } finally {
@@ -207,24 +227,25 @@ test('gateway validation accepts HTTPS and explicitly allowed HTTP only', async 
   const previous = process.env.MAGPIE_VISION_SELF_CHECK;
   process.env.MAGPIE_VISION_SELF_CHECK = 'self-check-token';
   try {
-    await assert.rejects(
-      activate({}, { enabled: true, gatewayUrl: 'http://vision.example/', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: false }),
+    await assertToolConfigError(
+      { enabled: true, gatewayUrl: 'http://vision.example/', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: false },
       /HTTPS is required/
     );
-    await assert.rejects(
-      activate({}, { enabled: true, gatewayUrl: 'ftp://vision.example/', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: true }),
+    await assertToolConfigError(
+      { enabled: true, gatewayUrl: 'ftp://vision.example/', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: true },
       /must use http or https/
     );
-    await assert.rejects(
-      activate({}, { enabled: true, gatewayUrl: 'https://user:password@vision.example/', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: true }),
+    await assertToolConfigError(
+      { enabled: true, gatewayUrl: 'https://user:password@vision.example/', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: true },
       /must not contain credentials/
     );
-    await assert.rejects(
-      activate(context(), { enabled: true, gatewayUrl: 'https://@vision.example/', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: true }),
+    await assertToolConfigError(
+      { enabled: true, gatewayUrl: 'https://@vision.example/', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: true },
       /must not contain credentials/
     );
     let tool;
-    await activate(context((registered) => { tool = registered; }), { enabled: true, gatewayUrl: 'https://vision.example/', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: false });
+    const ctx = context((registered) => { tool = registered; });
+    await activate(ctx, { enabled: true, gatewayUrl: 'https://vision.example/', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: false });
     assert.equal(tool.name, 'analyze_image');
     const warnings = [];
     await activate(context(() => {}, warnings), { enabled: true, gatewayUrl: 'http://vision.example/', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: true });

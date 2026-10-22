@@ -18,7 +18,7 @@ The bundle's `magpie` row uses the package `@alex222222222222/magpie` and accept
 
 HTTPS is required by default. Setting `allowInsecureHttp: true` permits HTTP and always emits a warning, including when the configured gateway is HTTPS, because the bearer key would be exposed if the gateway were changed to HTTP. The URL must not include user information. The token is sent only in the `Authorization: Bearer …` header.
 
-The gateway URL is intentionally not preconfigured. The MCP endpoint is `<gatewayUrl>/mcp/magpie/vision`: trailing slashes are removed and a gateway path prefix, such as `https://example.com/gateway`, is preserved. When enabled, activation reports a missing gateway separately from a missing or empty token environment variable.
+The gateway URL is intentionally not preconfigured. The MCP endpoint is `<gatewayUrl>/mcp/magpie/vision`: trailing slashes are removed and a gateway path prefix, such as `https://example.com/gateway`, is preserved. The plugin starts with blank settings so its Web UI configuration page remains available. Tool calls report a missing gateway separately from a missing or empty token environment variable.
 
 ### Web UI configuration
 
@@ -79,4 +79,4 @@ Install from GitHub:
 dsh plugin --profile web add github:Alex222222222222/dsh-magpie
 ```
 
-The repository root is the bundle package and includes both the Host JavaScript runtime (`magpie-vision/index.js`) and the Web client runtime (`magpie-vision/client.js`), so no installation build script is required. See the [repository installation guide](../README.md) for the Host token and profile endpoint configuration required before activation. For local development, install the repository root as the local bundle.
+The repository root is the bundle package and includes both the Host JavaScript runtime (`magpie-vision/index.js`) and the Web client runtime (`magpie-vision/client.js`), so no installation build script is required. See the [repository installation guide](../README.md) for the Host token and profile endpoint configuration; the Web UI is available to set a blank gateway after installation. For local development, install the repository root as the local bundle.

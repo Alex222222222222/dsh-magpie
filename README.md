@@ -56,6 +56,6 @@ You can also edit these settings directly in the DSH Web UI:
 
 Edits saved in the UI persist to your profile configuration and apply immediately to subsequent tool calls without restarting the host.
 
-The plugin derives the MCP endpoint by appending `mcp/magpie/vision`, so the example above calls `https://magpie-gateway.alex1222.com/mcp/magpie/vision`. That endpoint must provide the MCP tool `analyze_image` accepting an `image` data URL and an optional `prompt`. `gatewayUrl` has no default and must be configured before the tool can activate. To use another token environment variable, set `tokenEnv` in the same config.
+The plugin derives the MCP endpoint by appending `mcp/magpie/vision`, so the example above calls `https://magpie-gateway.alex1222.com/mcp/magpie/vision`. That endpoint must provide the MCP tool `analyze_image` accepting an `image` data URL and an optional `prompt`. `gatewayUrl` has no default; the plugin starts without it so you can configure it in the Web UI, while tool calls report a clear configuration error until it is set. To use another token environment variable, set `tokenEnv` in the same config.
 
 The tool accepts `analyze_image({ path?, image?, prompt? })` for PNG, JPEG, WebP, or GIF files up to 20 MiB from the workspace or `/tmp`, as well as direct data URLs. `image` is supported as an alias for `path`. See [the full plugin documentation](magpie-vision/README.md) for configuration, protocol details, and the documented filesystem replacement race.

@@ -115,8 +115,7 @@ function textFromResult(result) {
   return result.content.filter((block)=>block.type === 'text' && typeof block.text === 'string').map((block)=>block.text).join('\n');
 }
 export async function activate(ctx, config) {
-  const endpoint = resolveEndpoint(config);
-  if (endpoint === undefined) return;
+  if (!config.enabled) return;
   ctx.systemPrompt.section({
     name: 'magpie:instructions',
     order: 3050,
