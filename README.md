@@ -10,6 +10,16 @@ dsh plugin --profile web add github:Alex222222222222/dsh-magpie
 
 The repository includes the JavaScript runtime; installation requires no build script. DSH adds the bundle to the `web` profile. Restart the web host after configuring it.
 
+## Update
+
+To update an existing installation to the latest commit from this GitHub repository:
+
+```sh
+dsh plugin --profile web update @local/magpie-vision
+```
+
+`@local/magpie-vision` is the installed package name. Restart the DSH web host after the update to load the new code. Your endpoint settings in the profile's `cordis.patch.yml` and Host token environment variable remain unchanged.
+
 ## Configure
 
 Set `MAGPIE_VISION_TOKEN` in the environment of the DSH Host process. In the `web` profile's `cordis.patch.yml`, configure the plugin endpoint:
