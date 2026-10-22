@@ -3,7 +3,7 @@ import { once } from 'node:events';
 import pathModule from 'node:path';
 import { createServer } from 'node:http';
 import test from 'node:test';
-import { activate, Config, imageData, sanitizeResult } from '../index.js';
+import { activate, Config, imageData, sanitizeResult, visionEndpoint } from '../index.js';
 
 const context = (registered = () => {}, warnings = []) => {
   const sections = new Map();
@@ -41,7 +41,7 @@ async function mockMcpServer(options = {}) {
     if (chunks.length === 0) { response.writeHead(202).end(); return; }
     const message = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     methods.push(message.method);
-    requests.push({ headers: request.headers, message });
+    requests.push({ headers: request.headers, url: request.url, message });
     if (message.method === 'notifications/initialized') { response.writeHead(202).end(); return; }
     if (options.httpFailMethod === message.method) {
       markCallStarted();
@@ -68,7 +68,7 @@ async function mockMcpServer(options = {}) {
   return {
     methods, requests, callStarted,
     releaseCall: () => finishHeldCall(),
-    url: `http://127.0.0.1:${server.address().port}/mcp`,
+    gatewayUrl: `http://127.0.0.1:${server.address().port}`,
     close: () => new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
   };
 }
@@ -86,17 +86,24 @@ async function setupMcpInvocation(mock) {
     async stat() { return { type: 'file', size: 8 }; },
     async readBytes() { return Uint8Array.of(137, 80, 78, 71, 13, 10, 26, 10); }
   };
-  await activate(ctx, { enabled: true, endpointUrl: mock.url, tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: true });
+  await activate(ctx, { enabled: true, gatewayUrl: mock.gatewayUrl, tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: true });
   return { ctx, tool, exec: { agent: { session: { header: { cwd: '/workspace' } } }, signal: new AbortController().signal } };
 }
 
-test('Config applies documented defaults and keeps endpoint optional', () => {
+test('Config applies documented defaults and keeps the gateway optional', () => {
   assert.deepEqual(Config({}), {
     enabled: true,
     instructionMode: 'normal',
-    tokenEnv: 'MAGPIE_VISION_TOKEN',
+    tokenEnv: 'MAGPIE_API_KEY',
     allowInsecureHttp: false
   });
+});
+
+test('the vision MCP endpoint is derived from the gateway URL', () => {
+  assert.equal(visionEndpoint('https://magpie-gateway.alex1222.com/'), 'https://magpie-gateway.alex1222.com/mcp/magpie/vision');
+  assert.equal(visionEndpoint('https://magpie-gateway.alex1222.com'), 'https://magpie-gateway.alex1222.com/mcp/magpie/vision');
+  assert.equal(visionEndpoint('https://example.com/gateway/'), 'https://example.com/gateway/mcp/magpie/vision');
+  assert.equal(visionEndpoint('  https://example.com  '), 'https://example.com/mcp/magpie/vision');
 });
 
 test('normal instruction mode registers no system prompt', async () => {
@@ -104,7 +111,7 @@ test('normal instruction mode registers no system prompt', async () => {
   process.env.MAGPIE_VISION_SELF_CHECK = 'self-check-token';
   try {
     const ctx = context();
-    await activate(ctx, { enabled: true, instructionMode: 'normal', endpointUrl: 'https://vision.example/mcp', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: false });
+    await activate(ctx, { enabled: true, instructionMode: 'normal', gatewayUrl: 'https://vision.example/', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: false });
     assert.equal(ctx.sections.size, 0);
     await ctx.cleanup();
   } finally {
@@ -122,7 +129,7 @@ test('suggest and force modes contribute mode-specific guidance only when the to
       ['force', /You MUST use analyze_image/]
     ]) {
       const ctx = context();
-      await activate(ctx, { enabled: true, instructionMode, endpointUrl: 'https://vision.example/mcp', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: false });
+      await activate(ctx, { enabled: true, instructionMode, gatewayUrl: 'https://vision.example/', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: false });
       const section = ctx.sections.get('magpie:instructions');
       assert.ok(section);
       assert.match(section.text({ scope: {} }), expected);
@@ -154,10 +161,10 @@ test('disabled configuration skips validation and tool registration', async () =
   assert.equal(registered, false);
 });
 
-test('enabled configuration reports a missing endpoint', async () => {
+test('enabled configuration reports a missing gateway', async () => {
   await assert.rejects(
-    activate({}, { enabled: true, tokenEnv: 'MAGPIE_VISION_TOKEN', allowInsecureHttp: false }),
-    /endpointUrl is required/
+    activate({}, { enabled: true, tokenEnv: 'MAGPIE_API_KEY', allowInsecureHttp: false }),
+    /gatewayUrl is required/
   );
 });
 
@@ -166,11 +173,11 @@ test('enabled configuration reports the configured missing token', async () => {
   delete process.env.MAGPIE_VISION_SELF_CHECK;
   try {
     await assert.rejects(
-      activate({}, { enabled: true, endpointUrl: 'https://vision.example/mcp', tokenEnv: ' ', allowInsecureHttp: false }),
+      activate({}, { enabled: true, gatewayUrl: 'https://vision.example/', tokenEnv: ' ', allowInsecureHttp: false }),
       /tokenEnv must name/
     );
     await assert.rejects(
-      activate({}, { enabled: true, endpointUrl: 'https://vision.example/mcp', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: false }),
+      activate({}, { enabled: true, gatewayUrl: 'https://vision.example/', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: false }),
       /MAGPIE_VISION_SELF_CHECK.*not set/
     );
   } finally {
@@ -179,32 +186,32 @@ test('enabled configuration reports the configured missing token', async () => {
   }
 });
 
-test('endpoint validation accepts HTTPS and explicitly allowed HTTP only', async () => {
+test('gateway validation accepts HTTPS and explicitly allowed HTTP only', async () => {
   const previous = process.env.MAGPIE_VISION_SELF_CHECK;
   process.env.MAGPIE_VISION_SELF_CHECK = 'self-check-token';
   try {
     await assert.rejects(
-      activate({}, { enabled: true, endpointUrl: 'http://vision.example/mcp', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: false }),
+      activate({}, { enabled: true, gatewayUrl: 'http://vision.example/', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: false }),
       /HTTPS is required/
     );
     await assert.rejects(
-      activate({}, { enabled: true, endpointUrl: 'ftp://vision.example/mcp', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: true }),
+      activate({}, { enabled: true, gatewayUrl: 'ftp://vision.example/', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: true }),
       /must use http or https/
     );
     await assert.rejects(
-      activate({}, { enabled: true, endpointUrl: 'https://user:password@vision.example/mcp', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: true }),
+      activate({}, { enabled: true, gatewayUrl: 'https://user:password@vision.example/', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: true }),
       /must not contain credentials/
     );
     await assert.rejects(
-      activate(context(), { enabled: true, endpointUrl: 'https://@vision.example/mcp', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: true }),
+      activate(context(), { enabled: true, gatewayUrl: 'https://@vision.example/', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: true }),
       /must not contain credentials/
     );
     let tool;
-    await activate(context((registered) => { tool = registered; }), { enabled: true, endpointUrl: 'https://vision.example/mcp', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: false });
+    await activate(context((registered) => { tool = registered; }), { enabled: true, gatewayUrl: 'https://vision.example/', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: false });
     assert.equal(tool.name, 'analyze_image');
     const warnings = [];
-    await activate(context(() => {}, warnings), { enabled: true, endpointUrl: 'http://vision.example/mcp', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: true });
-    await activate(context(() => {}, warnings), { enabled: true, endpointUrl: 'https://vision.example/mcp', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: true });
+    await activate(context(() => {}, warnings), { enabled: true, gatewayUrl: 'http://vision.example/', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: true });
+    await activate(context(() => {}, warnings), { enabled: true, gatewayUrl: 'https://vision.example/', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: true });
     assert.equal(warnings.length, 2);
     assert.match(warnings.join('\n'), /allowInsecureHttp.*enabled.*bearer.*expos/i);
   } finally {
@@ -238,7 +245,7 @@ test('file validation rejects missing, symlink, directory, oversized, and unsupp
     }
   };
   try {
-    await activate(ctx, { enabled: true, endpointUrl: 'https://vision.example/mcp', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: false });
+    await activate(ctx, { enabled: true, gatewayUrl: 'https://vision.example/', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: false });
     const exec = { agent: { session: { header: { cwd: '/workspace' } } }, signal: new AbortController().signal };
     await assert.rejects(tool.execute({ path: 'missing' }, exec), /image not found/);
     await assert.rejects(tool.execute({ path: 'link' }, exec), /not a regular file/);
@@ -271,7 +278,7 @@ test('image paths must remain within the active agent working directory', async 
     async readBytes() { readCount++; return Uint8Array.of(137, 80, 78, 71, 13, 10, 26, 10); }
   };
   try {
-    await activate(ctx, { enabled: true, endpointUrl: 'https://vision.example/mcp', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: false });
+    await activate(ctx, { enabled: true, gatewayUrl: 'https://vision.example/', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: false });
     const exec = { agent: { session: { header: { cwd: '/workspace/project' } } }, signal: new AbortController().signal };
     await assert.rejects(tool.execute({ path: '../outside.png' }, exec), /outside the agent working directory/);
     await assert.rejects(tool.execute({ path: '/private/outside.png' }, exec), /outside the agent working directory/);
@@ -298,7 +305,7 @@ test('tool discovery verifies analyze_image before transmitting image bytes', as
     async readBytes() { readCount++; return Uint8Array.of(137, 80, 78, 71, 13, 10, 26, 10); }
   };
   try {
-    await activate(ctx, { enabled: true, endpointUrl: mock.url, tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: true });
+    await activate(ctx, { enabled: true, gatewayUrl: mock.gatewayUrl, tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: true });
     await assert.rejects(tool.execute({ path: 'photo.png' }, { agent: { session: { header: { cwd: '/workspace' } } }, signal: new AbortController().signal }), /vision request failed: MCP server does not provide analyze_image/);
     assert.deepEqual(mock.methods, ['initialize', 'notifications/initialized', 'tools/list']);
     assert.equal(readCount, 1);
@@ -324,6 +331,7 @@ test('MCP call discovers the tool, sends the image with bearer auth, and preserv
     assert.deepEqual(mock.methods, ['initialize', 'notifications/initialized', 'tools/list', 'tools/call']);
     assert.equal(mock.requests.find(({ message }) => message.method === 'initialize').message.params.clientInfo.name, 'dsh-magpie');
     assert.equal(toolCall.headers.authorization, 'Bearer local-mock-token');
+    assert.equal(mock.requests[0].url, '/mcp/magpie/vision');
     assert.deepEqual(toolCall.message.params.arguments, { image: 'data:image/png;base64,iVBORw0KGgo=', prompt: 'read its label' });
     assert.deepEqual(result, { content: [{ type: 'text', text: 'mock image result' }], structuredContent: { label: 'test' } });
   } finally {
@@ -459,7 +467,7 @@ test('plugin cleanup aborts a filesystem read already in progress', async () => 
   const controller = new AbortController();
   let pending;
   try {
-    await activate(ctx, { enabled: true, endpointUrl: 'http://127.0.0.1:1/mcp', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: true });
+    await activate(ctx, { enabled: true, gatewayUrl: 'http://127.0.0.1:1', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: true });
     pending = tool.execute({ path: 'photo.png' }, { agent: { session: { header: { cwd: '/workspace' } } }, signal: controller.signal });
     await readStarted;
     await ctx.cleanup();

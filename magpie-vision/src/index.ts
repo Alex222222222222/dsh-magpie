@@ -17,8 +17,8 @@ function imageMimeType(bytes: Uint8Array): string | undefined {
 export const Config = z.object({
   enabled: z.boolean().default(true),
   instructionMode: z.union([z.const('normal'), z.const('suggest'), z.const('force')]).default('normal'),
-  endpointUrl: z.string().required(false),
-  tokenEnv: z.string().default('MAGPIE_VISION_TOKEN'),
+  gatewayUrl: z.string().required(false),
+  tokenEnv: z.string().default('MAGPIE_API_KEY'),
   allowInsecureHttp: z.boolean().default(false)
 });
 
@@ -34,7 +34,7 @@ const INSTRUCTIONS: Record<'suggest' | 'force', string> = {
 interface VisionConfig {
   enabled: boolean;
   instructionMode?: 'normal' | 'suggest' | 'force';
-  endpointUrl?: string;
+  gatewayUrl?: string;
   tokenEnv: string;
   allowInsecureHttp: boolean;
 }
@@ -53,23 +53,30 @@ export function imageData(_path: string, bytes: Uint8Array): string {
   return `data:${mimeType};base64,${Buffer.from(bytes).toString('base64')}`;
 }
 
+const VISION_PATH = 'mcp/magpie/vision';
+
+export function visionEndpoint(gatewayUrl: string): string {
+  return `${gatewayUrl.trim().replace(/\/+$/, '')}/${VISION_PATH}`;
+}
+
 function resolveEndpoint(config: VisionConfig): { url: URL; token: string } | undefined {
   if (!config.enabled) return undefined;
-  if (!config.endpointUrl?.trim()) throw new Error('magpie: endpointUrl is required when enabled');
+  if (!config.gatewayUrl?.trim()) throw new Error('magpie: gatewayUrl is required when enabled');
   if (!config.tokenEnv.trim()) throw new Error('magpie: tokenEnv must name a non-empty environment variable');
+  const endpoint = visionEndpoint(config.gatewayUrl);
   let url: URL;
   try {
-    url = new URL(config.endpointUrl);
+    url = new URL(endpoint);
   } catch {
-    throw new Error('magpie: endpointUrl must be an absolute HTTP or HTTPS URL');
+    throw new Error('magpie: gatewayUrl must be an absolute HTTP or HTTPS URL');
   }
   if (url.protocol !== 'https:' && url.protocol !== 'http:') {
-    throw new Error('magpie: endpointUrl must use http or https');
+    throw new Error('magpie: gatewayUrl must use http or https');
   }
-  const authority = config.endpointUrl.match(/^https?:\/\/([^/?#]*)/i)?.[1];
-  if (authority === undefined) throw new Error('magpie: endpointUrl must be an absolute HTTP or HTTPS URL');
+  const authority = endpoint.match(/^https?:\/\/([^/?#]*)/i)?.[1];
+  if (authority === undefined) throw new Error('magpie: gatewayUrl must be an absolute HTTP or HTTPS URL');
   if (url.username || url.password || authority.includes('@')) {
-    throw new Error('magpie: endpointUrl must not contain credentials');
+    throw new Error('magpie: gatewayUrl must not contain credentials');
   }
   if (url.protocol === 'http:' && !config.allowInsecureHttp) {
     throw new Error('magpie: HTTPS is required; set allowInsecureHttp: true to permit HTTP');

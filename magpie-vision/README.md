@@ -10,13 +10,13 @@ The bundle's `magpie` row uses the package `@alex222222222222/magpie` and accept
 | --- | --- | --- |
 | `enabled` | `true` | Set to `false` to skip configuration validation and register no tool or system prompt. |
 | `instructionMode` | `normal` | `normal` adds no prompt text; `suggest` and `force` add guidance to use this bundle's tools (see [Agent instructions](#agent-instructions)). |
-| `endpointUrl` | unset | Absolute URL of the remote MCP endpoint. Required when enabled. |
-| `tokenEnv` | `MAGPIE_VISION_TOKEN` | Environment-variable name containing the bearer token. |
-| `allowInsecureHttp` | `false` | Set to `true` to permit an HTTP endpoint. |
+| `gatewayUrl` | unset | Base URL of the Magpie gateway, for example `https://magpie-gateway.alex1222.com/`. Required when enabled; the plugin appends `mcp/magpie/vision`. |
+| `tokenEnv` | `MAGPIE_API_KEY` | Environment-variable name containing the bearer token. |
+| `allowInsecureHttp` | `false` | Set to `true` to permit an HTTP gateway. |
 
-HTTPS is required by default. Setting `allowInsecureHttp: true` permits HTTP and always emits a warning, including when the configured endpoint is HTTPS, because the bearer key would be exposed if the endpoint were changed to HTTP. The URL must not include user information. The token is sent only in the `Authorization: Bearer …` header.
+HTTPS is required by default. Setting `allowInsecureHttp: true` permits HTTP and always emits a warning, including when the configured gateway is HTTPS, because the bearer key would be exposed if the gateway were changed to HTTP. The URL must not include user information. The token is sent only in the `Authorization: Bearer …` header.
 
-The endpoint URL is intentionally not preconfigured. When enabled, activation reports a missing endpoint separately from a missing or empty token environment variable.
+The gateway URL is intentionally not preconfigured. The MCP endpoint is `<gatewayUrl>/mcp/magpie/vision`: trailing slashes are removed and a gateway path prefix, such as `https://example.com/gateway`, is preserved. When enabled, activation reports a missing gateway separately from a missing or empty token environment variable.
 
 ## Agent instructions
 

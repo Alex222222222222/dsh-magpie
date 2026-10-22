@@ -33,20 +33,20 @@ In your profile's configuration overrides, change `id: magpie-vision` to `id: ma
 
 ## Configure
 
-Set `MAGPIE_VISION_TOKEN` in the environment of the DSH Host process. In the `web` profile's `cordis.patch.yml`, configure the plugin endpoint:
+Set `MAGPIE_API_KEY` in the environment of the DSH Host process. In the `web` profile's `cordis.patch.yml`, configure the Magpie gateway URL:
 
 ```yaml
 - id: magpie
   config:
     enabled: true
     instructionMode: normal
-    endpointUrl: https://your-vision-server.example/mcp
-    tokenEnv: MAGPIE_VISION_TOKEN
+    gatewayUrl: https://magpie-gateway.alex1222.com/
+    tokenEnv: MAGPIE_API_KEY
     allowInsecureHttp: false
 ```
 
 `instructionMode` controls the agent guidance the bundle adds to the system prompt: `normal` (default) adds nothing, `suggest` recommends the plugin's tools, and `force` requires using them whenever image inspection or recognition is needed. `force` is an instruction to the model, not a technical restriction.
 
-The endpoint must provide the MCP tool `analyze_image` accepting an `image` data URL and an optional `prompt`. The endpoint has no default and must be configured before the tool can activate. To use another token environment variable, set `tokenEnv` in the same config.
+The plugin derives the MCP endpoint by appending `mcp/magpie/vision`, so the example above calls `https://magpie-gateway.alex1222.com/mcp/magpie/vision`. That endpoint must provide the MCP tool `analyze_image` accepting an `image` data URL and an optional `prompt`. `gatewayUrl` has no default and must be configured before the tool can activate. To use another token environment variable, set `tokenEnv` in the same config.
 
 The tool accepts `analyze_image({ path, prompt? })` for PNG, JPEG, WebP, or GIF files up to 20 MiB. See [the full plugin documentation](magpie-vision/README.md) for configuration, protocol details, and the documented filesystem replacement race.

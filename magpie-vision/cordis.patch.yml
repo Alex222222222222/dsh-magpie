@@ -3,5 +3,5 @@
       name: '@alex222222222222/magpie'
       config:
         enabled: true
-        tokenEnv: MAGPIE_VISION_TOKEN
+        tokenEnv: MAGPIE_API_KEY
         allowInsecureHttp: false
