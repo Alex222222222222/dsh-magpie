@@ -43,4 +43,10 @@ A successful `tools/call` response carries `result.content`, an array of MCP con
 
 ## Installation
 
-Install the `magpie-vision` directory as a local bundle using DSH Plugin Manager's bundle installation workflow. Configure the endpoint and token environment variable in the Host environment before enabling the tool. This implementation work does not install or enable the bundle in a profile.
+Install from GitHub:
+
+```sh
+dsh plugin --profile web add github:Alex222222222222/dsh-magpie
+```
+
+The repository root is the bundle package and includes the generated JavaScript runtime, so no installation build script is required. See the [repository installation guide](../README.md) for the Host token and profile endpoint configuration required before activation. For local development, install the repository root as the local bundle.
