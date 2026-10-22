@@ -23,15 +23,26 @@ function imageMimeType(bytes) {
 }
 export const Config = z.object({
   enabled: z.boolean().default(true),
+  instructionMode: z.union([
+    z.const('normal'),
+    z.const('suggest'),
+    z.const('force')
+  ]).default('normal'),
   endpointUrl: z.string().required(false),
   tokenEnv: z.string().default('MAGPIE_VISION_TOKEN'),
   allowInsecureHttp: z.boolean().default(false)
 });
 export const inject = [
   'tools',
-  'fs'
+  'fs',
+  'systemPrompt'
 ];
 export const name = 'magpie';
+// Update these texts when the plugin gains more MCP capabilities.
+const INSTRUCTIONS = {
+  suggest: 'When you need to inspect or recognize an image, prefer the analyze_image tool. Do not claim to have inspected an image unless analyze_image succeeds.',
+  force: 'You MUST use analyze_image whenever the task requires inspecting or recognizing an image. Do not answer from an unseen or assumed image; report analyze_image failures honestly.'
+};
 export function imageData(_path, bytes) {
   if (bytes.byteLength > MAX_IMAGE_BYTES) throw new Error('Image exceeds the 20 MiB size limit');
   const mimeType = imageMimeType(bytes);
@@ -92,6 +103,14 @@ function textFromResult(result) {
   return result.content.filter((block)=>block.type === 'text' && typeof block.text === 'string').map((block)=>block.text).join('\n');
 }
 export async function activate(ctx, config) {
+  const instructionMode = config.instructionMode ?? 'normal';
+  if (config.enabled && instructionMode !== 'normal') {
+    ctx.systemPrompt.section({
+      name: 'magpie:instructions',
+      order: 3050,
+      text: ({ scope })=>ctx.tools.get('analyze_image', scope) === undefined ? '' : INSTRUCTIONS[instructionMode]
+    });
+  }
   const endpoint = resolveEndpoint(config);
   if (endpoint === undefined) return;
   const visionEndpoint = endpoint;

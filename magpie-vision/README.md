@@ -8,7 +8,8 @@ The bundle's `magpie` row uses the package `@alex222222222222/magpie` and accept
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `enabled` | `true` | Set to `false` to skip configuration validation and register no tool. |
+| `enabled` | `true` | Set to `false` to skip configuration validation and register no tool or system prompt. |
+| `instructionMode` | `normal` | `normal` adds no prompt text; `suggest` and `force` add guidance to use this bundle's tools (see [Agent instructions](#agent-instructions)). |
 | `endpointUrl` | unset | Absolute URL of the remote MCP endpoint. Required when enabled. |
 | `tokenEnv` | `MAGPIE_VISION_TOKEN` | Environment-variable name containing the bearer token. |
 | `allowInsecureHttp` | `false` | Set to `true` to permit an HTTP endpoint. |
@@ -16,6 +17,18 @@ The bundle's `magpie` row uses the package `@alex222222222222/magpie` and accept
 HTTPS is required by default. Setting `allowInsecureHttp: true` permits HTTP and always emits a warning, including when the configured endpoint is HTTPS, because the bearer key would be exposed if the endpoint were changed to HTTP. The URL must not include user information. The token is sent only in the `Authorization: Bearer …` header.
 
 The endpoint URL is intentionally not preconfigured. When enabled, activation reports a missing endpoint separately from a missing or empty token environment variable.
+
+## Agent instructions
+
+`instructionMode` selects whether the bundle adds guidance to the agent's system prompt:
+
+| Value | Effect |
+| --- | --- |
+| `normal` | Default. Contributes no prompt text. |
+| `suggest` | Suggests using `analyze_image` when image inspection or recognition would help. |
+| `force` | Requires using `analyze_image` whenever the task needs image inspection or recognition. |
+
+The section is registered only while the plugin is enabled and contributes text only for agents whose tool view includes `analyze_image`, so agents with restricted tools see no dangling instructions. The text lives in one constant in the runtime; extend it when the bundle gains further Magpie tools. These are model instructions, not enforcement: the plugin still validates every tool call itself.
 
 ## Tool
 

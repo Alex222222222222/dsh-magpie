@@ -39,10 +39,13 @@ Set `MAGPIE_VISION_TOKEN` in the environment of the DSH Host process. In the `we
 - id: magpie
   config:
     enabled: true
+    instructionMode: normal
     endpointUrl: https://your-vision-server.example/mcp
     tokenEnv: MAGPIE_VISION_TOKEN
     allowInsecureHttp: false
 ```
+
+`instructionMode` controls the agent guidance the bundle adds to the system prompt: `normal` (default) adds nothing, `suggest` recommends the plugin's tools, and `force` requires using them whenever image inspection or recognition is needed. `force` is an instruction to the model, not a technical restriction.
 
 The endpoint must provide the MCP tool `analyze_image` accepting an `image` data URL and an optional `prompt`. The endpoint has no default and must be configured before the tool can activate. To use another token environment variable, set `tokenEnv` in the same config.
 

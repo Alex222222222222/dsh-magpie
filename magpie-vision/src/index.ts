@@ -16,16 +16,24 @@ function imageMimeType(bytes: Uint8Array): string | undefined {
 
 export const Config = z.object({
   enabled: z.boolean().default(true),
+  instructionMode: z.union([z.const('normal'), z.const('suggest'), z.const('force')]).default('normal'),
   endpointUrl: z.string().required(false),
   tokenEnv: z.string().default('MAGPIE_VISION_TOKEN'),
   allowInsecureHttp: z.boolean().default(false)
 });
 
-export const inject = ['tools', 'fs'];
+export const inject = ['tools', 'fs', 'systemPrompt'];
 export const name = 'magpie';
+
+// Update these texts when the plugin gains more MCP capabilities.
+const INSTRUCTIONS: Record<'suggest' | 'force', string> = {
+  suggest: 'When you need to inspect or recognize an image, prefer the analyze_image tool. Do not claim to have inspected an image unless analyze_image succeeds.',
+  force: 'You MUST use analyze_image whenever the task requires inspecting or recognizing an image. Do not answer from an unseen or assumed image; report analyze_image failures honestly.'
+};
 
 interface VisionConfig {
   enabled: boolean;
+  instructionMode?: 'normal' | 'suggest' | 'force';
   endpointUrl?: string;
   tokenEnv: string;
   allowInsecureHttp: boolean;
@@ -33,7 +41,8 @@ interface VisionConfig {
 
 type PluginContext = Context & {
   fs: FileSystem;
-  tools: { register(tool: ToolDefinition): () => void };
+  systemPrompt: { section(section: { name: string; order: number; text: (context: { scope?: object }) => string }): () => void };
+  tools: { register(tool: ToolDefinition): () => void; get(name: string, scope?: object): ToolDefinition | undefined };
   logger: Context['logger'];
 };
 
@@ -100,6 +109,14 @@ function textFromResult(result: { content: Array<Record<string, unknown>> }): st
 }
 
 export async function activate(ctx: PluginContext, config: VisionConfig): Promise<void> {
+  const instructionMode = config.instructionMode ?? 'normal';
+  if (config.enabled && instructionMode !== 'normal') {
+    ctx.systemPrompt.section({
+      name: 'magpie:instructions',
+      order: 3050,
+      text: ({ scope }) => ctx.tools.get('analyze_image', scope) === undefined ? '' : INSTRUCTIONS[instructionMode]
+    });
+  }
   const endpoint = resolveEndpoint(config);
   if (endpoint === undefined) return;
   const visionEndpoint = endpoint;

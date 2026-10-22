@@ -5,11 +5,28 @@ import { createServer } from 'node:http';
 import test from 'node:test';
 import { activate, Config, imageData, sanitizeResult } from '../index.js';
 
-const context = (registered = () => {}, warnings = []) => ({
-  tools: { register(tool) { registered(tool); return () => {}; } },
-  logger: Object.assign(() => ({ warn(message) { warnings.push(message); } }), { warn() {} }),
-  effect(callback) { this.cleanup = callback(); }
-});
+const context = (registered = () => {}, warnings = []) => {
+  const sections = new Map();
+  const disposers = [];
+  return {
+    tools: {
+      register(tool) { registered(tool); return () => {}; },
+      get(name, scope) { return name === 'analyze_image' && !(scope && scope.hidden) ? { name } : undefined; }
+    },
+    systemPrompt: {
+      section(section) {
+        sections.set(section.name, section);
+        const dispose = () => sections.delete(section.name);
+        disposers.push(dispose);
+        return dispose;
+      }
+    },
+    sections,
+    logger: Object.assign(() => ({ warn(message) { warnings.push(message); } }), { warn() {} }),
+    effect(callback) { disposers.push(callback()); },
+    async cleanup() { for (const dispose of disposers.splice(0).reverse()) await dispose(); }
+  };
+};
 
 async function mockMcpServer(options = {}) {
   const methods = [];
@@ -76,9 +93,59 @@ async function setupMcpInvocation(mock) {
 test('Config applies documented defaults and keeps endpoint optional', () => {
   assert.deepEqual(Config({}), {
     enabled: true,
+    instructionMode: 'normal',
     tokenEnv: 'MAGPIE_VISION_TOKEN',
     allowInsecureHttp: false
   });
+});
+
+test('normal instruction mode registers no system prompt', async () => {
+  const previous = process.env.MAGPIE_VISION_SELF_CHECK;
+  process.env.MAGPIE_VISION_SELF_CHECK = 'self-check-token';
+  try {
+    const ctx = context();
+    await activate(ctx, { enabled: true, instructionMode: 'normal', endpointUrl: 'https://vision.example/mcp', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: false });
+    assert.equal(ctx.sections.size, 0);
+    await ctx.cleanup();
+  } finally {
+    if (previous === undefined) delete process.env.MAGPIE_VISION_SELF_CHECK;
+    else process.env.MAGPIE_VISION_SELF_CHECK = previous;
+  }
+});
+
+test('suggest and force modes contribute mode-specific guidance only when the tool is visible', async () => {
+  const previous = process.env.MAGPIE_VISION_SELF_CHECK;
+  process.env.MAGPIE_VISION_SELF_CHECK = 'self-check-token';
+  try {
+    for (const [instructionMode, expected] of [
+      ['suggest', /prefer the analyze_image tool/],
+      ['force', /You MUST use analyze_image/]
+    ]) {
+      const ctx = context();
+      await activate(ctx, { enabled: true, instructionMode, endpointUrl: 'https://vision.example/mcp', tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: false });
+      const section = ctx.sections.get('magpie:instructions');
+      assert.ok(section);
+      assert.match(section.text({ scope: {} }), expected);
+      assert.equal(section.text({ scope: { hidden: true } }), '');
+      ctx.tools.get = (name) => name === 'analyze_image' ? { name } : undefined;
+      assert.match(section.text({}), expected);
+      await ctx.cleanup();
+      assert.equal(ctx.sections.size, 0);
+    }
+  } finally {
+    if (previous === undefined) delete process.env.MAGPIE_VISION_SELF_CHECK;
+    else process.env.MAGPIE_VISION_SELF_CHECK = previous;
+  }
+});
+
+test('disabled plugin registers no tools or system prompt', async () => {
+  const ctx = context(() => assert.fail('disabled plugin must not register its tool'));
+  await activate(ctx, { enabled: false, instructionMode: 'force' });
+  assert.equal(ctx.sections.size, 0);
+});
+
+test('invalid instruction mode is rejected by configuration', () => {
+  assert.throws(() => Config({ instructionMode: 'always' }), /instructionMode/);
 });
 
 test('disabled configuration skips validation and tool registration', async () => {
