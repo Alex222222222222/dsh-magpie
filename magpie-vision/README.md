@@ -49,7 +49,7 @@ The section is registered while the plugin is enabled and contributes text only 
 
 ## Tool
 
-`analyze_image({ path, prompt? })` accepts a path relative to the active agent's session working directory and an optional question. The plugin rejects paths that resolve outside that working directory, paths whose final component is a symbolic link, missing paths, directories, unsupported image content, and files over 20 MiB before making a network request. Supported content is PNG, JPEG, WebP, and GIF. The image is sent as a MIME-correct `data:<mime>;base64,...` argument to the MCP tool named `analyze_image`.
+`analyze_image({ path?, image?, prompt? })` accepts an image path relative to the active agent's session working directory, an absolute path under `/tmp`, or a pre-encoded data URL (`data:image/...`). `image` is an alias for `path`. The plugin rejects paths that resolve outside the workspace or `/tmp`, paths whose final component is a symbolic link, missing paths, directories, unsupported image content, and files over 20 MiB before making a network request. Supported content is PNG, JPEG, WebP, and GIF. For local files, the image is read locally and sent as a MIME-correct `data:<mime>;base64,...` argument to the MCP tool named `analyze_image`. Pre-encoded `data:` URLs or HTTP(S) URLs pass through directly.
 
 The DSH filesystem API checks containment before reading by path and does not provide a stable-handle no-follow byte read. If another process replaces the image or an ancestor path between validation and the read, the plugin could read and upload bytes from outside the workspace. Avoid modifying image paths concurrently with an analysis.
 

@@ -133,12 +133,15 @@ export async function activate(ctx, config) {
   const activeWork = new Set();
   const tool = defineTool({
     name: 'analyze_image',
-    description: 'Analyze an image file from the current agent workspace with the configured vision service.',
+    description: 'Analyze an image file from the workspace or /tmp with the configured vision service.',
     parameters: {
       path: {
         type: 'string',
-        required: true,
-        description: 'Image path relative to the active agent working directory.'
+        description: 'Image path relative to the active agent working directory or under /tmp.'
+      },
+      image: {
+        type: 'string',
+        description: 'Alias for path, or a direct data URL (data:image/...) or http(s) URL.'
       },
       prompt: {
         type: 'string',
@@ -195,36 +198,47 @@ export async function activate(ctx, config) {
         activeWork.delete(workController);
       }
       async function run(signal) {
+        if (!config.enabled) throw new Error('magpie: plugin is disabled');
         // Resolved per call so a settings edit applies without restarting the host.
         const visionEndpoint = resolveEndpoint(config);
-        if (visionEndpoint === undefined) throw new Error('magpie: plugin is disabled');
+        if (visionEndpoint === undefined) {
+          throw new Error('magpie: gatewayUrl is required; configure it in Plugins -> Magpie -> Configure or cordis.patch.yml');
+        }
         token = visionEndpoint.token;
         const agent = exec.agent;
         if (agent === undefined) throw new Error('magpie: analyze_image requires an active agent');
         const cwd = agent.session.header.cwd;
         if (!cwd) throw new Error('magpie: active agent has no working directory');
-        if (!args.path.trim()) throw new Error('magpie: path must not be empty');
-        const lstat = await ctx.fs.lstat(args.path, {
-          cwd
-        }, signal);
-        if (lstat === undefined) throw new Error(`magpie: image not found: ${args.path}`);
-        if (lstat.type !== 'file') throw new Error(`magpie: image path is not a regular file: ${args.path}`);
-        const workspace = await ctx.fs.resolve(cwd, {
-          cwd,
-          signal
-        });
-        const target = await ctx.fs.resolve(args.path, {
-          cwd,
-          signal
-        });
-        if (!ctx.fs.contains(workspace, target)) throw new Error('magpie: image path is outside the agent working directory');
-        const info = await ctx.fs.stat(target, signal);
-        if (info === undefined || info.type !== 'file') throw new Error(`magpie: image not found or not a regular file: ${args.path}`);
-        if (info.size !== undefined && info.size > MAX_IMAGE_BYTES) throw new Error('magpie: image exceeds the 20 MiB size limit');
-        // shortcut: ctx.fs has no stable-handle byte read; upgrade when it can no-follow and read atomically.
-        const bytes = await ctx.fs.readBytes(target, signal, MAX_IMAGE_BYTES);
-        signal.throwIfAborted();
-        const image = imageData(args.path, bytes);
+        const input = (args.path || args.image || '').trim();
+        if (!input) throw new Error('magpie: path must not be empty');
+        let image;
+        if (input.startsWith('data:image/') || /^https?:\/\//i.test(input)) {
+          image = input;
+        } else {
+          const lstat = await ctx.fs.lstat(input, {
+            cwd
+          }, signal);
+          if (lstat === undefined) throw new Error(`magpie: image not found: ${input}`);
+          if (lstat.type !== 'file') throw new Error(`magpie: image path is not a regular file: ${input}`);
+          const workspace = await ctx.fs.resolve(cwd, {
+            cwd,
+            signal
+          });
+          const target = await ctx.fs.resolve(input, {
+            cwd,
+            signal
+          });
+          const isWorkspace = ctx.fs.contains(workspace, target);
+          const isTmp = target.displayPath.startsWith('/tmp/') || target.displayPath.startsWith('/private/tmp/');
+          if (!isWorkspace && !isTmp) throw new Error('magpie: image path is outside the agent working directory');
+          const info = await ctx.fs.stat(target, signal);
+          if (info === undefined || info.type !== 'file') throw new Error(`magpie: image not found or not a regular file: ${input}`);
+          if (info.size !== undefined && info.size > MAX_IMAGE_BYTES) throw new Error('magpie: image exceeds the 20 MiB size limit');
+          // shortcut: ctx.fs has no stable-handle byte read; upgrade when it can no-follow and read atomically.
+          const bytes = await ctx.fs.readBytes(target, signal, MAX_IMAGE_BYTES);
+          signal.throwIfAborted();
+          image = imageData(input, bytes);
+        }
         if (disposed) throw new Error('magpie: plugin is shutting down');
         const client = new Client({
           name: 'dsh-magpie',

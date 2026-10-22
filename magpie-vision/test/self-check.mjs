@@ -374,6 +374,36 @@ test('a settings write to the gateway applies to the next call without restart',
   }
 });
 
+test('analyze_image accepts image parameter alias, files in /tmp, and direct data URLs', async () => {
+  const previous = process.env.MAGPIE_VISION_SELF_CHECK;
+  process.env.MAGPIE_VISION_SELF_CHECK = 'local-mock-token';
+  const mock = await mockMcpServer();
+  let ctx;
+  let tool;
+  let exec;
+  try {
+    ({ ctx, tool, exec } = await setupMcpInvocation(mock));
+
+    // 1. Calling with image parameter alias pointing to /tmp file
+    await tool.execute({ image: '/tmp/kcl_proposal-1.png', prompt: 'test /tmp file' }, exec);
+    let toolCall = mock.requests.find(({ message }) => message.method === 'tools/call');
+    assert.ok(toolCall.message.params.arguments.image.startsWith('data:image/png;base64,'));
+    assert.equal(toolCall.message.params.arguments.prompt, 'test /tmp file');
+
+    // 2. Calling with direct pre-encoded data URL
+    mock.requests.length = 0;
+    await tool.execute({ image: 'data:image/jpeg;base64,iVBORw0KGgo=', prompt: 'direct data URL' }, exec);
+    toolCall = mock.requests.find(({ message }) => message.method === 'tools/call');
+    assert.equal(toolCall.message.params.arguments.image, 'data:image/jpeg;base64,iVBORw0KGgo=');
+    assert.equal(toolCall.message.params.arguments.prompt, 'direct data URL');
+  } finally {
+    if (ctx?.cleanup) await ctx.cleanup();
+    await mock.close();
+    if (previous === undefined) delete process.env.MAGPIE_VISION_SELF_CHECK;
+    else process.env.MAGPIE_VISION_SELF_CHECK = previous;
+  }
+});
+
 test('MCP call discovers the tool, sends the image with bearer auth, and preserves results', async () => {
   const previous = process.env.MAGPIE_VISION_SELF_CHECK;
   process.env.MAGPIE_VISION_SELF_CHECK = 'local-mock-token';

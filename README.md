@@ -58,4 +58,4 @@ Edits saved in the UI persist to your profile configuration and apply immediatel
 
 The plugin derives the MCP endpoint by appending `mcp/magpie/vision`, so the example above calls `https://magpie-gateway.alex1222.com/mcp/magpie/vision`. That endpoint must provide the MCP tool `analyze_image` accepting an `image` data URL and an optional `prompt`. `gatewayUrl` has no default and must be configured before the tool can activate. To use another token environment variable, set `tokenEnv` in the same config.
 
-The tool accepts `analyze_image({ path, prompt? })` for PNG, JPEG, WebP, or GIF files up to 20 MiB. See [the full plugin documentation](magpie-vision/README.md) for configuration, protocol details, and the documented filesystem replacement race.
+The tool accepts `analyze_image({ path?, image?, prompt? })` for PNG, JPEG, WebP, or GIF files up to 20 MiB from the workspace or `/tmp`, as well as direct data URLs. `image` is supported as an alias for `path`. See [the full plugin documentation](magpie-vision/README.md) for configuration, protocol details, and the documented filesystem replacement race.
