@@ -1,18 +1,20 @@
 # Magpie
 
-A DSH Host bundle that registers `analyze_image`, reads one image from the active agent's workspace, and sends it to a configurable remote MCP vision server.
+A DSH bundle that registers `analyze_image`, reads one image from the active agent's workspace, sends it to a configurable remote MCP vision server, and provides a Web configuration panel in the DSH Web UI.
 
 ## Configuration
 
 The bundle's `magpie` row uses the package `@alex222222222222/magpie` and accepts:
 
-| Setting | Default | Meaning |
-| --- | --- | --- |
-| `enabled` | `true` | Set to `false` to skip configuration validation and register no tool or system prompt. |
-| `instructionMode` | `normal` | `normal` adds no prompt text; `suggest` and `force` add guidance to use this bundle's tools (see [Agent instructions](#agent-instructions)). |
-| `gatewayUrl` | unset | Base URL of the Magpie gateway, for example `https://magpie-gateway.alex1222.com/`. Required when enabled; the plugin appends `mcp/magpie/vision`. |
-| `tokenEnv` | `MAGPIE_API_KEY` | Environment-variable name containing the bearer token. |
-| `allowInsecureHttp` | `false` | Set to `true` to permit an HTTP gateway. |
+| Setting | Default | Live UI | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | `true` | Row switch | Set to `false` to skip configuration validation and register no tool or system prompt. |
+| `instructionMode` | `normal` | Yes (volatile) | `normal` adds no prompt text; `suggest` and `force` add guidance to use this bundle's tools (see [Agent instructions](#agent-instructions)). |
+| `gatewayUrl` | unset | Yes (volatile) | Base URL of the Magpie gateway, for example `https://magpie-gateway.alex1222.com/`. Required when enabled; the plugin appends `mcp/magpie/vision`. |
+| `tokenEnv` | `MAGPIE_API_KEY` | Yes (volatile) | Environment-variable name containing the bearer token. |
+| `allowInsecureHttp` | `false` | Yes (volatile) | Set to `true` to permit an HTTP gateway. |
+
+`instructionMode`, `gatewayUrl`, `tokenEnv`, and `allowInsecureHttp` are volatile configuration fields. Edits made through the DSH settings service update live references and apply to subsequent tool calls and prompt generation immediately without restarting the host.
 
 HTTPS is required by default. Setting `allowInsecureHttp: true` permits HTTP and always emits a warning, including when the configured gateway is HTTPS, because the bearer key would be exposed if the gateway were changed to HTTP. The URL must not include user information. The token is sent only in the `Authorization: Bearer …` header.
 
@@ -25,7 +27,13 @@ Settings can be managed directly in the DSH Web UI without editing YAML files ma
 2. Click **Magpie** (`@alex222222222222/magpie`).
 3. Click **Configure** on the `magpie` row.
 
-The panel provides staged editing with validation for `gatewayUrl`, `tokenEnv`, `instructionMode`, and `allowInsecureHttp`. Saving writes changes directly through the DSH settings service into the active profile's configuration, and updates apply immediately to subsequent tool calls and system prompts without restarting the host.
+The panel provides staged editing with validation:
+- **Gateway URL**: Text input with absolute HTTP/HTTPS URL validation.
+- **Token environment variable**: Text input validating standard environment variable names.
+- **Agent instructions**: Segmented control (`normal`, `suggest`, `force`).
+- **Allow plain HTTP**: Toggle switch for insecure HTTP access.
+- **Save & Discard**: Revision-fenced save writing directly into the active profile's Cordis patch, and a discard button to revert drafts to stored snapshot values.
+- **Bilingual**: Supports English and Chinese locales (`settings.magpie` namespace).
 
 ## Agent instructions
 
@@ -37,7 +45,7 @@ The panel provides staged editing with validation for `gatewayUrl`, `tokenEnv`, 
 | `suggest` | Suggests using `analyze_image` when image inspection or recognition would help. |
 | `force` | Requires using `analyze_image` whenever the task needs image inspection or recognition. |
 
-The section is registered only while the plugin is enabled and contributes text only for agents whose tool view includes `analyze_image`, so agents with restricted tools see no dangling instructions. The text lives in one constant in the runtime; extend it when the bundle gains further Magpie tools. These are model instructions, not enforcement: the plugin still validates every tool call itself.
+The section is registered while the plugin is enabled and contributes text only for agents whose tool view includes `analyze_image`, so agents with restricted tools see no dangling instructions. Because `instructionMode` is a volatile reference evaluated dynamically during prompt assembly, changing modes in the Web UI immediately updates system prompt generation on subsequent agent turns without restarting the host. These are model instructions, not enforcement: the plugin still validates every tool call itself.
 
 ## Tool
 
@@ -71,4 +79,4 @@ Install from GitHub:
 dsh plugin --profile web add github:Alex222222222222/dsh-magpie
 ```
 
-The repository root is the bundle package and includes the generated JavaScript runtime, so no installation build script is required. See the [repository installation guide](../README.md) for the Host token and profile endpoint configuration required before activation. For local development, install the repository root as the local bundle.
+The repository root is the bundle package and includes both the Host JavaScript runtime (`magpie-vision/index.js`) and the Web client runtime (`magpie-vision/client.js`), so no installation build script is required. See the [repository installation guide](../README.md) for the Host token and profile endpoint configuration required before activation. For local development, install the repository root as the local bundle.

@@ -1,6 +1,6 @@
 # Magpie for DSH
 
-A DSH Host plugin that sends a workspace image to a configurable MCP vision endpoint.
+A DSH plugin that provides the `analyze_image` tool for workspace image analysis and a Web UI settings panel to configure the remote MCP vision endpoint.
 
 ## Install
 
@@ -8,7 +8,7 @@ A DSH Host plugin that sends a workspace image to a configurable MCP vision endp
 dsh plugin --profile web add github:Alex222222222222/dsh-magpie
 ```
 
-The repository includes the JavaScript runtime; installation requires no build script. DSH adds the bundle to the `web` profile. Restart the web host after configuring it.
+The repository includes both the Host and Web client JavaScript runtimes; installation requires no build script. DSH adds the bundle to the `web` profile. Restart the DSH web host after installation to load the bundle.
 
 ## Update
 
@@ -18,7 +18,7 @@ To update an existing installation to the latest commit from this GitHub reposit
 dsh plugin --profile web update @alex222222222222/magpie
 ```
 
-`@alex222222222222/magpie` is the installed package name. Restart the DSH web host after the update to load the new code. Your endpoint settings in the profile's `cordis.patch.yml` and Host token environment variable remain unchanged.
+`@alex222222222222/magpie` is the installed package name. Restart the DSH web host after the update to load the new code. Your settings in the profile's `cordis.patch.yml` and Host token environment variable remain unchanged.
 
 ### Migrating from the old package name
 
