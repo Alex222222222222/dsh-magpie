@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import pathModule from 'node:path';
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import test from 'node:test';
-import { activate, Config, imageData, sanitizeResult, visionEndpoint } from '../index.js';
+import * as plugin from '../index.js';
+
+const { activate, Config, imageData, sanitizeResult, searchEndpoint, visionEndpoint } = plugin;
 
 const context = (registered = () => {}, warnings = []) => {
   const sections = new Map();
@@ -188,10 +191,10 @@ test('web search instructions support plain settings without changing image guid
 
 test('web search disabled defaults make no network requests with blank shared settings', async () => {
   const mock = await mockMcpServer();
-  const ctx = context(() => assert.fail('disabled images and search must not register tools'));
+  const ctx = context((tool) => { if (tool.name !== 'analyze_image') assert.fail(`disabled search registered ${tool.name}`); });
   ctx.tools.schemas = () => [{ name: 'mcp__magpie_search__web_search' }];
   try {
-    const config = Config({ enabled: false, gatewayUrl: mock.gatewayUrl, tokenEnv: '', webSearchInstructionMode: 'force' });
+    const config = Config({ enabled: true, webSearchEnabled: false, gatewayUrl: mock.gatewayUrl, tokenEnv: '', webSearchInstructionMode: 'force' });
     await activate(ctx, config);
     const section = ctx.sections.get('magpie:web-search-instructions');
     assert.ok(section, 'live search settings must be supported while disabled');
@@ -200,6 +203,194 @@ test('web search disabled defaults make no network requests with blank shared se
   } finally {
     await ctx.cleanup();
     await mock.close();
+  }
+});
+
+test('web search discovers advertised tools independently from image enablement', async () => {
+  const previous = process.env.MAGPIE_VISION_SELF_CHECK;
+  process.env.MAGPIE_VISION_SELF_CHECK = 'search-self-check-token';
+  const mock = await mockMcpServer({ tools: [
+    { name: 'web_search', description: 'Search the web', inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } },
+    { name: 'news_search', description: 'Search news', inputSchema: { type: 'object', properties: { query: { type: 'string' } } } },
+    { name: 'search with spaces and a name that makes the public form exceed the DSH limit while remaining unique', inputSchema: { type: 'object', properties: {} } }
+  ] });
+  const registered = [];
+  const ctx = context((tool) => registered.push(tool));
+  try {
+    await activate(ctx, {
+      enabled: false,
+      webSearchEnabled: true,
+      gatewayUrl: mock.gatewayUrl,
+      tokenEnv: 'MAGPIE_VISION_SELF_CHECK',
+      allowInsecureHttp: true
+    });
+    assert.deepEqual(registered.slice(0, 2).map((tool) => tool.name), [
+      'mcp__magpie_search__web_search',
+      'mcp__magpie_search__news_search'
+    ]);
+    const longName = 'search with spaces and a name that makes the public form exceed the DSH limit while remaining unique';
+    const normalizedLongName = `mcp__magpie_search__${longName}`.replace(/[^A-Za-z0-9_-]/g, '_');
+    const hash = createHash('sha256').update(`magpie_search\0${longName}`).digest('hex').slice(0, 12);
+    assert.equal(registered[2].name, `${normalizedLongName.slice(0, 51)}_${hash}`);
+    assert.equal(registered[2].name.length, 64);
+    assert.match(registered[2].name, /^[A-Za-z0-9_-]+$/);
+    assert.deepEqual(mock.methods, ['initialize', 'notifications/initialized', 'tools/list']);
+    assert.equal(mock.requests[0].url, '/mcp/magpie/web-search');
+    assert.equal(mock.requests[0].headers.authorization, 'Bearer search-self-check-token');
+    assert.equal(searchEndpoint('  https://example.com/gateway///  '), 'https://example.com/gateway/mcp/magpie/web-search');
+  } finally {
+    await ctx.cleanup();
+    await mock.close();
+    if (previous === undefined) delete process.env.MAGPIE_VISION_SELF_CHECK;
+    else process.env.MAGPIE_VISION_SELF_CHECK = previous;
+  }
+});
+
+test('web search forwards raw names and arguments and preserves canonical results', async () => {
+  const previous = process.env.MAGPIE_VISION_SELF_CHECK;
+  process.env.MAGPIE_VISION_SELF_CHECK = 'search-self-check-token';
+  const mock = await mockMcpServer({
+    tools: [{ name: 'web_search', description: 'Search the web', inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } }],
+    callResult: { content: [{ type: 'text', text: 'two results; bearer: search-self-check-token' }, { type: 'resource', resource: { uri: 'https://example.com/result', mimeType: 'text/plain', text: 'linked result' } }], structuredContent: { count: 2, bearer: 'search-self-check-token' } }
+  });
+  let tool;
+  const ctx = context((registered) => { tool = registered; });
+  try {
+    await activate(ctx, {
+      enabled: false,
+      webSearchEnabled: true,
+      gatewayUrl: mock.gatewayUrl,
+      tokenEnv: 'MAGPIE_VISION_SELF_CHECK',
+      allowInsecureHttp: true
+    });
+    const args = { query: 'weather in Paris' };
+    const result = await tool.execute(args, { signal: new AbortController().signal });
+    const call = mock.requests.find(({ message }) => message.method === 'tools/call');
+    assert.equal(call.message.params.name, 'web_search');
+    assert.deepEqual(call.message.params.arguments, args);
+    assert.deepEqual(result, { content: [{ type: 'text', text: 'two results; bearer: [redacted]' }, { type: 'resource', resource: { uri: 'https://example.com/result', mimeType: 'text/plain', text: 'linked result' } }], structuredContent: { count: 2, bearer: '[redacted]' } });
+  } finally {
+    await ctx.cleanup();
+    await mock.close();
+    if (previous === undefined) delete process.env.MAGPIE_VISION_SELF_CHECK;
+    else process.env.MAGPIE_VISION_SELF_CHECK = previous;
+  }
+});
+
+test('web search call errors redact bearer values', async () => {
+  const previous = process.env.MAGPIE_VISION_SELF_CHECK;
+  process.env.MAGPIE_VISION_SELF_CHECK = 'search-self-check-token';
+  const mock = await mockMcpServer({ failMethod: 'tools/call', errorBody: 'search-self-check-token call rejected' });
+  let tool;
+  const ctx = context((registered) => { if (registered.name.startsWith('mcp__magpie_search__')) tool = registered; });
+  try {
+    await activate(ctx, {
+      enabled: false,
+      webSearchEnabled: true,
+      gatewayUrl: mock.gatewayUrl,
+      tokenEnv: 'MAGPIE_VISION_SELF_CHECK',
+      allowInsecureHttp: true
+    });
+    await assert.rejects(tool.execute({}, { signal: new AbortController().signal }), (error) => {
+      assert.match(error.message, /\[redacted\] call rejected/);
+      assert.doesNotMatch(error.message, /search-self-check-token/);
+      return true;
+    });
+  } finally {
+    await ctx.cleanup();
+    await mock.close();
+    if (previous === undefined) delete process.env.MAGPIE_VISION_SELF_CHECK;
+    else process.env.MAGPIE_VISION_SELF_CHECK = previous;
+  }
+});
+
+test('web search skips invalid schemas, task-required tools, and individual registration conflicts', async () => {
+  const previous = process.env.MAGPIE_VISION_SELF_CHECK;
+  process.env.MAGPIE_VISION_SELF_CHECK = 'search-self-check-token';
+  const schema = { type: 'object', properties: {} };
+  const mock = await mockMcpServer({ tools: [
+    { name: 'valid_one', inputSchema: schema },
+    { name: 'valid_one', inputSchema: schema },
+    { name: 'invalid_schema', inputSchema: { type: 'object', properties: { query: { type: 'string', pattern: '.*' } } } },
+    { name: 'task_required', inputSchema: schema, execution: { taskSupport: 'required' } },
+    { name: 'conflict', inputSchema: schema },
+    { name: 'valid_two', inputSchema: schema }
+  ] });
+  const registered = [];
+  const warnings = [];
+  const ctx = context((tool) => {
+    if (tool.name === 'mcp__magpie_search__conflict') throw new Error('name already registered');
+    registered.push(tool);
+  }, warnings);
+  try {
+    await activate(ctx, {
+      enabled: false,
+      webSearchEnabled: true,
+      gatewayUrl: mock.gatewayUrl,
+      tokenEnv: 'MAGPIE_VISION_SELF_CHECK',
+      allowInsecureHttp: true
+    });
+    assert.deepEqual(registered.map((tool) => tool.name), ['mcp__magpie_search__valid_one', 'mcp__magpie_search__valid_two'], warnings.join('\n'));
+    assert.match(warnings.join('\n'), /duplicate tool name/);
+    assert.match(warnings.join('\n'), /invalid_schema/);
+    assert.match(warnings.join('\n'), /task_required/);
+    assert.match(warnings.join('\n'), /conflict/);
+  } finally {
+    await ctx.cleanup();
+    await mock.close();
+    if (previous === undefined) delete process.env.MAGPIE_VISION_SELF_CHECK;
+    else process.env.MAGPIE_VISION_SELF_CHECK = previous;
+  }
+});
+
+test('web search initial connection errors are logged without rejecting activation', async () => {
+  const previous = process.env.MAGPIE_VISION_SELF_CHECK;
+  process.env.MAGPIE_VISION_SELF_CHECK = 'search-self-check-token';
+  const warnings = [];
+  const registered = [];
+  const ctx = context((tool) => registered.push(tool), warnings);
+  try {
+    await assert.doesNotReject(activate(ctx, {
+      enabled: true,
+      webSearchEnabled: true,
+      gatewayUrl: 'https://user:search-self-check-token@example.com',
+      tokenEnv: 'MAGPIE_VISION_SELF_CHECK',
+      allowInsecureHttp: false
+    }));
+    assert.match(warnings.join('\n'), /web search/i);
+    assert.doesNotMatch(warnings.join('\n'), /search-self-check-token/);
+    assert.ok(registered.some((tool) => tool.name === 'analyze_image'));
+  } finally {
+    await ctx.cleanup();
+    if (previous === undefined) delete process.env.MAGPIE_VISION_SELF_CHECK;
+    else process.env.MAGPIE_VISION_SELF_CHECK = previous;
+  }
+});
+
+test('web search list failures preserve image activation and redact bearer diagnostics', async () => {
+  const previous = process.env.MAGPIE_VISION_SELF_CHECK;
+  process.env.MAGPIE_VISION_SELF_CHECK = 'search-self-check-token';
+  const mock = await mockMcpServer({ failMethod: 'tools/list', errorBody: 'search-self-check-token list rejected' });
+  const warnings = [];
+  const registered = [];
+  const ctx = context((tool) => registered.push(tool), warnings);
+  try {
+    await activate(ctx, {
+      enabled: true,
+      webSearchEnabled: true,
+      gatewayUrl: mock.gatewayUrl,
+      tokenEnv: 'MAGPIE_VISION_SELF_CHECK',
+      allowInsecureHttp: true
+    });
+    assert.deepEqual(mock.methods, ['initialize', 'notifications/initialized', 'tools/list']);
+    assert.ok(registered.some((tool) => tool.name === 'analyze_image'));
+    assert.match(warnings.join('\n'), /web search.*\[redacted\] list rejected/i);
+    assert.doesNotMatch(warnings.join('\n'), /search-self-check-token/);
+  } finally {
+    await ctx.cleanup();
+    await mock.close();
+    if (previous === undefined) delete process.env.MAGPIE_VISION_SELF_CHECK;
+    else process.env.MAGPIE_VISION_SELF_CHECK = previous;
   }
 });
 

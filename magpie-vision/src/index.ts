@@ -1,6 +1,8 @@
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
+import { createHash } from 'node:crypto';
+import { createMcpToolDefinition } from '@deepseek-ai/dsh-mcp-client';
 import z from '@deepseek-ai/schemastery';
-import { defineTool } from '@deepseek-ai/dsh-tools';
+import { assertObjectJsonSchema, defineTool } from '@deepseek-ai/dsh-tools';
 import type { Context, Volatile } from '@deepseek-ai/cordis';
 import type { FileSystem } from '@deepseek-ai/dsh-fs';
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools';
@@ -71,13 +73,21 @@ export function visionEndpoint(gatewayUrl: string): string {
   return `${gatewayUrl.trim().replace(/\/+$/, '')}/${VISION_PATH}`;
 }
 
+export function searchEndpoint(gatewayUrl: string): string {
+  return `${gatewayUrl.trim().replace(/\/+$/, '')}/mcp/magpie/web-search`;
+}
+
 function resolveEndpoint(config: VisionConfig): { url: URL; token: string } | undefined {
   if (!config.enabled) return undefined;
+  return resolveGateway(config, visionEndpoint);
+}
+
+function resolveGateway(config: VisionConfig, endpointFor: (gatewayUrl: string) => string): { url: URL; token: string } | undefined {
   const gatewayUrl = read(config.gatewayUrl);
   const tokenEnv = read(config.tokenEnv);
   if (!gatewayUrl?.trim()) throw new Error('magpie: gatewayUrl is required when enabled');
   if (!tokenEnv?.trim()) throw new Error('magpie: tokenEnv must name a non-empty environment variable');
-  const endpoint = visionEndpoint(gatewayUrl);
+  const endpoint = endpointFor(gatewayUrl);
   let url: URL;
   try {
     url = new URL(endpoint);
@@ -100,6 +110,18 @@ function resolveEndpoint(config: VisionConfig): { url: URL; token: string } | un
   return { url, token };
 }
 
+const SEARCH_SERVER_NAME = 'magpie_search';
+const MAX_PUBLIC_NAME_LENGTH = 64;
+const HASH_LENGTH = 12;
+
+function searchToolName(rawName: string): string {
+  const joined = `mcp__${SEARCH_SERVER_NAME}__${rawName}`;
+  const normalized = joined.replace(/[^A-Za-z0-9_-]/g, '_');
+  if (joined === normalized && joined.length <= MAX_PUBLIC_NAME_LENGTH) return joined;
+  const hash = createHash('sha256').update(`${SEARCH_SERVER_NAME}\0${rawName}`).digest('hex').slice(0, HASH_LENGTH);
+  return `${normalized.slice(0, MAX_PUBLIC_NAME_LENGTH - HASH_LENGTH - 1)}_${hash}`;
+}
+
 export function sanitizeResult<T>(value: T, token: string): T {
   const redact = (item: unknown): unknown => {
     if (typeof item === 'string') return item.split(token).join('[redacted]');
@@ -112,7 +134,7 @@ export function sanitizeResult<T>(value: T, token: string): T {
 
 function safeError(error: unknown, token: string): string {
   const message = error instanceof Error ? error.message : String(error);
-  return message.split(token).join('[redacted]');
+  return token ? message.split(token).join('[redacted]') : message;
 }
 
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
@@ -130,6 +152,10 @@ function textFromResult(result: { content: Array<Record<string, unknown>> }): st
 }
 
 export async function activate(ctx: PluginContext, config: VisionConfig): Promise<void> {
+  if (read(config.allowInsecureHttp) && (config.enabled || read(config.webSearchEnabled))) {
+    ctx.logger('magpie').warn('magpie: allowInsecureHttp is enabled; if HTTP is used, the bearer credential may be exposed in transit');
+  }
+
   if (config.webSearchEnabled !== undefined) {
     ctx.systemPrompt.section({
       name: 'magpie:web-search-instructions',
@@ -145,6 +171,108 @@ export async function activate(ctx: PluginContext, config: VisionConfig): Promis
       }
     });
   }
+
+  if (config.webSearchEnabled !== undefined) {
+    const logger = ctx.logger('magpie');
+    let searchClient: Client | undefined;
+    let searchTools = new Map<string, () => void>();
+    let disposed = false;
+
+    const warn = (message: string, token = '') => logger.warn(`magpie web search: ${safeError(message, token)}`);
+    const closeClient = async (client: Client | undefined) => { if (client) await client.close().catch(() => {}); };
+    const disposeTools = () => {
+      for (const dispose of searchTools.values()) {
+        try { dispose(); } catch (error) { warn(`tool disposal failed: ${String(error)}`); }
+      }
+      searchTools.clear();
+    };
+    const connectSearch = async (): Promise<void> => {
+      if (disposed) return;
+      const endpoint = resolveGateway(config, searchEndpoint);
+      if (!endpoint) return;
+      const client = new Client({ name: 'dsh-magpie-search', version: '1.0.0' });
+      let retained = false;
+      try {
+        await client.connect(new StreamableHTTPClientTransport(endpoint.url, {
+          requestInit: { headers: { Authorization: `Bearer ${endpoint.token}` } }
+        }));
+        const { tools } = await client.listTools();
+        if (disposed) return;
+
+        const definitions = new Map<string, { definition: ToolDefinition; rawName: string }>();
+        for (const advertised of tools) {
+          const publicName = searchToolName(advertised.name);
+          if (definitions.has(publicName)) {
+            warn(`duplicate tool name skipped: ${advertised.name}`, endpoint.token);
+            continue;
+          }
+          if (advertised.execution?.taskSupport === 'required') {
+            warn(`task-required tool skipped: ${advertised.name}`, endpoint.token);
+            continue;
+          }
+          try {
+            assertObjectJsonSchema(advertised.inputSchema);
+            definitions.set(publicName, {
+              rawName: advertised.name,
+              definition: createMcpToolDefinition(ctx, {
+                name: publicName,
+                rawName: advertised.name,
+                description: advertised.description ?? '',
+                inputSchema: advertised.inputSchema,
+                outputSchema: advertised.outputSchema,
+                call: async (args, exec) => {
+                  try {
+                    return sanitizeResult(await client.callTool({ name: advertised.name, arguments: args }, { signal: exec.signal, toolDefinition: advertised }), endpoint.token);
+                  } catch (error) {
+                    throw new Error(safeError(error, endpoint.token));
+                  }
+                }
+              })
+            });
+          } catch (error) {
+            warn(`invalid tool schema skipped (${advertised.name}): ${String(error)}`, endpoint.token);
+          }
+        }
+
+        if (disposed) return;
+        disposeTools();
+        const nextTools = new Map<string, () => void>();
+        for (const [publicName, { definition, rawName }] of definitions) {
+          try {
+            nextTools.set(publicName, ctx.tools.register(definition));
+          } catch (error) {
+            warn(`tool registration failed (${rawName}): ${String(error)}`, endpoint.token);
+          }
+        }
+        searchTools = nextTools;
+        const previous = searchClient;
+        searchClient = client;
+        retained = true;
+        await closeClient(previous);
+      } finally {
+        if (!retained) await closeClient(client);
+      }
+    };
+
+    ctx.effect(() => () => {
+      disposed = true;
+      disposeTools();
+      const client = searchClient;
+      searchClient = undefined;
+      return closeClient(client);
+    }, 'magpie.web_search');
+
+    if (read(config.webSearchEnabled)) {
+      try {
+        await connectSearch();
+      } catch (error) {
+        let token = '';
+        try { token = resolveGateway(config, searchEndpoint)?.token ?? ''; } catch { /* validation errors do not include the bearer value */ }
+        warn(`initial connection failed: ${String(error)}`, token);
+      }
+    }
+  }
+
   if (!config.enabled) return;
   ctx.systemPrompt.section({
     name: 'magpie:instructions',
@@ -154,10 +282,6 @@ export async function activate(ctx: PluginContext, config: VisionConfig): Promis
       return mode === 'normal' || ctx.tools.get('analyze_image', scope) === undefined ? '' : INSTRUCTIONS[mode];
     }
   });
-  if (read(config.allowInsecureHttp)) {
-    ctx.logger('magpie').warn('magpie: allowInsecureHttp is enabled; if HTTP is used, the bearer credential may be exposed in transit');
-  }
-
   let disposed = false;
   const activeClients = new Map<Client, AbortController>();
   const activeWork = new Set<AbortController>();

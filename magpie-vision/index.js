@@ -1,6 +1,8 @@
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
+import { createHash } from 'node:crypto';
+import { createMcpToolDefinition } from '@deepseek-ai/dsh-mcp-client';
 import z from '@deepseek-ai/schemastery';
-import { defineTool } from '@deepseek-ai/dsh-tools';
+import { assertObjectJsonSchema, defineTool } from '@deepseek-ai/dsh-tools';
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 function imageMimeType(bytes) {
   if (bytes.length >= 8 && [
@@ -64,13 +66,19 @@ const VISION_PATH = 'mcp/magpie/vision';
 export function visionEndpoint(gatewayUrl) {
   return `${gatewayUrl.trim().replace(/\/+$/, '')}/${VISION_PATH}`;
 }
+export function searchEndpoint(gatewayUrl) {
+  return `${gatewayUrl.trim().replace(/\/+$/, '')}/mcp/magpie/web-search`;
+}
 function resolveEndpoint(config) {
   if (!config.enabled) return undefined;
+  return resolveGateway(config, visionEndpoint);
+}
+function resolveGateway(config, endpointFor) {
   const gatewayUrl = read(config.gatewayUrl);
   const tokenEnv = read(config.tokenEnv);
   if (!gatewayUrl?.trim()) throw new Error('magpie: gatewayUrl is required when enabled');
   if (!tokenEnv?.trim()) throw new Error('magpie: tokenEnv must name a non-empty environment variable');
-  const endpoint = visionEndpoint(gatewayUrl);
+  const endpoint = endpointFor(gatewayUrl);
   let url;
   try {
     url = new URL(endpoint);
@@ -95,6 +103,16 @@ function resolveEndpoint(config) {
     token
   };
 }
+const SEARCH_SERVER_NAME = 'magpie_search';
+const MAX_PUBLIC_NAME_LENGTH = 64;
+const HASH_LENGTH = 12;
+function searchToolName(rawName) {
+  const joined = `mcp__${SEARCH_SERVER_NAME}__${rawName}`;
+  const normalized = joined.replace(/[^A-Za-z0-9_-]/g, '_');
+  if (joined === normalized && joined.length <= MAX_PUBLIC_NAME_LENGTH) return joined;
+  const hash = createHash('sha256').update(`${SEARCH_SERVER_NAME}\0${rawName}`).digest('hex').slice(0, HASH_LENGTH);
+  return `${normalized.slice(0, MAX_PUBLIC_NAME_LENGTH - HASH_LENGTH - 1)}_${hash}`;
+}
 export function sanitizeResult(value, token) {
   const redact = (item)=>{
     if (typeof item === 'string') return item.split(token).join('[redacted]');
@@ -109,7 +127,7 @@ export function sanitizeResult(value, token) {
 }
 function safeError(error, token) {
   const message = error instanceof Error ? error.message : String(error);
-  return message.split(token).join('[redacted]');
+  return token ? message.split(token).join('[redacted]') : message;
 }
 function jsonValue(value) {
   return JSON.parse(JSON.stringify(value));
@@ -121,6 +139,9 @@ function textFromResult(result) {
   return result.content.filter((block)=>block.type === 'text' && typeof block.text === 'string').map((block)=>block.text).join('\n');
 }
 export async function activate(ctx, config) {
+  if (read(config.allowInsecureHttp) && (config.enabled || read(config.webSearchEnabled))) {
+    ctx.logger('magpie').warn('magpie: allowInsecureHttp is enabled; if HTTP is used, the bearer credential may be exposed in transit');
+  }
   if (config.webSearchEnabled !== undefined) {
     ctx.systemPrompt.section({
       name: 'magpie:web-search-instructions',
@@ -134,6 +155,122 @@ export async function activate(ctx, config) {
       }
     });
   }
+  if (config.webSearchEnabled !== undefined) {
+    const logger = ctx.logger('magpie');
+    let searchClient;
+    let searchTools = new Map();
+    let disposed = false;
+    const warn = (message, token = '')=>logger.warn(`magpie web search: ${safeError(message, token)}`);
+    const closeClient = async (client)=>{
+      if (client) await client.close().catch(()=>{});
+    };
+    const disposeTools = ()=>{
+      for (const dispose of searchTools.values()){
+        try {
+          dispose();
+        } catch (error) {
+          warn(`tool disposal failed: ${String(error)}`);
+        }
+      }
+      searchTools.clear();
+    };
+    const connectSearch = async ()=>{
+      if (disposed) return;
+      const endpoint = resolveGateway(config, searchEndpoint);
+      if (!endpoint) return;
+      const client = new Client({
+        name: 'dsh-magpie-search',
+        version: '1.0.0'
+      });
+      let retained = false;
+      try {
+        await client.connect(new StreamableHTTPClientTransport(endpoint.url, {
+          requestInit: {
+            headers: {
+              Authorization: `Bearer ${endpoint.token}`
+            }
+          }
+        }));
+        const { tools } = await client.listTools();
+        if (disposed) return;
+        const definitions = new Map();
+        for (const advertised of tools){
+          const publicName = searchToolName(advertised.name);
+          if (definitions.has(publicName)) {
+            warn(`duplicate tool name skipped: ${advertised.name}`, endpoint.token);
+            continue;
+          }
+          if (advertised.execution?.taskSupport === 'required') {
+            warn(`task-required tool skipped: ${advertised.name}`, endpoint.token);
+            continue;
+          }
+          try {
+            assertObjectJsonSchema(advertised.inputSchema);
+            definitions.set(publicName, {
+              rawName: advertised.name,
+              definition: createMcpToolDefinition(ctx, {
+                name: publicName,
+                rawName: advertised.name,
+                description: advertised.description ?? '',
+                inputSchema: advertised.inputSchema,
+                outputSchema: advertised.outputSchema,
+                call: async (args, exec)=>{
+                  try {
+                    return sanitizeResult(await client.callTool({
+                      name: advertised.name,
+                      arguments: args
+                    }, {
+                      signal: exec.signal,
+                      toolDefinition: advertised
+                    }), endpoint.token);
+                  } catch (error) {
+                    throw new Error(safeError(error, endpoint.token));
+                  }
+                }
+              })
+            });
+          } catch (error) {
+            warn(`invalid tool schema skipped (${advertised.name}): ${String(error)}`, endpoint.token);
+          }
+        }
+        if (disposed) return;
+        disposeTools();
+        const nextTools = new Map();
+        for (const [publicName, { definition, rawName }] of definitions){
+          try {
+            nextTools.set(publicName, ctx.tools.register(definition));
+          } catch (error) {
+            warn(`tool registration failed (${rawName}): ${String(error)}`, endpoint.token);
+          }
+        }
+        searchTools = nextTools;
+        const previous = searchClient;
+        searchClient = client;
+        retained = true;
+        await closeClient(previous);
+      } finally{
+        if (!retained) await closeClient(client);
+      }
+    };
+    ctx.effect(()=>()=>{
+        disposed = true;
+        disposeTools();
+        const client = searchClient;
+        searchClient = undefined;
+        return closeClient(client);
+      }, 'magpie.web_search');
+    if (read(config.webSearchEnabled)) {
+      try {
+        await connectSearch();
+      } catch (error) {
+        let token = '';
+        try {
+          token = resolveGateway(config, searchEndpoint)?.token ?? '';
+        } catch  {}
+        warn(`initial connection failed: ${String(error)}`, token);
+      }
+    }
+  }
   if (!config.enabled) return;
   ctx.systemPrompt.section({
     name: 'magpie:instructions',
@@ -143,9 +280,6 @@ export async function activate(ctx, config) {
       return mode === 'normal' || ctx.tools.get('analyze_image', scope) === undefined ? '' : INSTRUCTIONS[mode];
     }
   });
-  if (read(config.allowInsecureHttp)) {
-    ctx.logger('magpie').warn('magpie: allowInsecureHttp is enabled; if HTTP is used, the bearer credential may be exposed in transit');
-  }
   let disposed = false;
   const activeClients = new Map();
   const activeWork = new Set();
