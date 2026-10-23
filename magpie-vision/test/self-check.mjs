@@ -90,10 +90,6 @@ async function mockMcpServer(options = {}) {
     const message = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     methods.push(message.method);
     requests.push({ headers: request.headers, url: request.url, message });
-    for (const waiter of requestWaiters.splice(0)) {
-      if (methods.filter((method) => method === waiter.method).length >= waiter.count) waiter.resolve();
-      else requestWaiters.push(waiter);
-    }
     const failuresRemaining = failureCounts.get(message.method) ?? 0;
     if (failuresRemaining > 0) {
       failureCounts.set(message.method, failuresRemaining - 1);
@@ -426,12 +422,12 @@ test('web search initial list failures retry and recover without overlapping req
     await mock.failureStarted;
     assert.deepEqual(mock.methods, ['initialize', 'notifications/initialized', 'tools/list']);
     await new Promise((resolve) => setTimeout(resolve, 600));
-    assert.deepEqual(mock.methods, ['initialize', 'notifications/initialized', 'tools/list'], 'retry waits until the failed request settles');
+    assert.deepEqual(mock.methods, ['initialize', 'notifications/initialized', 'tools/list'], 'retry must not overlap the failed request');
     mock.releaseFailure();
     await activation;
-    await mock.waitForMethod('tools/list', 2);
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    assert.deepEqual(mock.methods, ['initialize', 'notifications/initialized', 'tools/list', 'initialize', 'notifications/initialized', 'tools/list']);
     await registration;
-    assert.equal(mock.methods.filter((method) => method === 'initialize').length, 2);
     assert.equal(mock.maxConcurrentFailures, 1);
     assert.match(warnings.join('\n'), /web search.*\[redacted\] list rejected/i);
     assert.doesNotMatch(warnings.join('\n'), /search-self-check-token/);
