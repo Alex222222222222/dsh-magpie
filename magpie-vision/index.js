@@ -172,8 +172,13 @@ export async function activate(ctx, config) {
     let connectingSearchClient;
     let searchToken = '';
     let searchTools = new Map();
+    const activeSearchCalls = new Set();
     let retryTimer;
+    let retryCount = 0;
+    let generation = 0;
     let disposed = false;
+    let syncQueue = Promise.resolve();
+    let latestSignature = '';
     const warn = (message, token = searchToken)=>logger.warn(`magpie web search: ${safeError(message, token)}`);
     const closingClients = new WeakMap();
     const closeClient = (client)=>{
@@ -195,12 +200,128 @@ export async function activate(ctx, config) {
       }
       searchTools.clear();
     };
-    const connectSearch = async (endpoint)=>{
-      if (disposed) return;
+    const enqueue = (work)=>{
+      const operation = syncQueue.then(work);
+      syncQueue = operation.catch((error)=>warn(`synchronization failed: ${String(error)}`));
+      return operation;
+    };
+    const stopGeneration = async ()=>{
+      generation++;
+      if (retryTimer !== undefined) clearTimeout(retryTimer);
+      retryTimer = undefined;
+      for (const controller of activeSearchCalls){
+        controller.abort(new Error('magpie web search: connector stopped'));
+      }
+      activeSearchCalls.clear();
+      disposeTools();
+      const clients = [
+        searchClient,
+        connectingSearchClient
+      ];
+      searchClient = undefined;
+      connectingSearchClient = undefined;
+      await Promise.all(clients.map(closeClient));
+    };
+    const buildToolDefinitions = (tools, client, current, token)=>{
+      const definitions = new Map();
+      for (const advertised of tools){
+        const publicName = searchToolName(advertised.name);
+        if (definitions.has(publicName)) {
+          warn(`duplicate tool name skipped: ${advertised.name}`, token);
+          continue;
+        }
+        if (advertised.execution?.taskSupport === 'required') {
+          warn(`task-required tool skipped: ${advertised.name}`, token);
+          continue;
+        }
+        try {
+          assertObjectJsonSchema(advertised.inputSchema);
+          definitions.set(publicName, {
+            rawName: advertised.name,
+            definition: createMcpToolDefinition(ctx, {
+              name: publicName,
+              rawName: advertised.name,
+              description: advertised.description ?? '',
+              inputSchema: advertised.inputSchema,
+              outputSchema: advertised.outputSchema,
+              call: async (args, exec)=>{
+                if (disposed || current !== generation) throw new Error('magpie web search: plugin is disabled or reconfiguring');
+                const callController = new AbortController();
+                const abortCall = ()=>callController.abort(exec.signal.reason);
+                if (exec.signal.aborted) abortCall();
+                else exec.signal.addEventListener('abort', abortCall, {
+                  once: true
+                });
+                activeSearchCalls.add(callController);
+                try {
+                  return sanitizeResult(await client.callTool({
+                    name: advertised.name,
+                    arguments: args
+                  }, {
+                    signal: callController.signal,
+                    toolDefinition: advertised
+                  }), token);
+                } catch (error) {
+                  if (callController.signal.aborted) throw new Error(`magpie web search: request cancelled: ${safeError(error, token)}`);
+                  throw new Error(safeError(error, token));
+                } finally{
+                  exec.signal.removeEventListener('abort', abortCall);
+                  activeSearchCalls.delete(callController);
+                }
+              }
+            })
+          });
+        } catch (error) {
+          warn(`invalid tool schema skipped (${advertised.name}): ${String(error)}`, token);
+        }
+      }
+      return definitions;
+    };
+    const registerToolDefinitions = (definitions, token)=>{
+      const next = new Map();
+      for (const [name, { definition, rawName }] of definitions){
+        try {
+          next.set(name, ctx.tools.register(definition));
+        } catch (error) {
+          warn(`tool registration failed (${rawName}): ${String(error)}`, token);
+        }
+      }
+      return next;
+    };
+    const connectSearch = async (endpoint, current)=>{
+      if (disposed || current !== generation) return;
       searchToken = endpoint.token;
       const client = new Client({
         name: 'dsh-magpie-search',
         version: '1.0.0'
+      }, {
+        listChanged: {
+          tools: {
+            autoRefresh: false,
+            debounceMs: 0,
+            onChanged: (error)=>{
+              if (error) {
+                warn(`tool list notification failed: ${error.message}`, endpoint.token);
+                return;
+              }
+              if (!disposed && current === generation) {
+                void enqueue(async ()=>{
+                  if (disposed || current !== generation || client !== searchClient) return;
+                  try {
+                    const { tools } = await client.listTools();
+                    if (disposed || current !== generation || client !== searchClient) return;
+                    const definitions = buildToolDefinitions(tools, client, current, endpoint.token);
+                    disposeTools();
+                    if (disposed || current !== generation || client !== searchClient) return;
+                    searchTools = registerToolDefinitions(definitions, endpoint.token);
+                  } catch (refreshError) {
+                    warn(`tool list refresh failed: ${String(refreshError)}`, endpoint.token);
+                  }
+                });
+              }
+            }
+          }
+        }
       });
       connectingSearchClient = client;
       let retained = false;
@@ -213,100 +334,110 @@ export async function activate(ctx, config) {
           }
         }));
         const { tools } = await client.listTools();
-        if (disposed) return;
-        const definitions = new Map();
-        for (const advertised of tools){
-          const publicName = searchToolName(advertised.name);
-          if (definitions.has(publicName)) {
-            warn(`duplicate tool name skipped: ${advertised.name}`, endpoint.token);
-            continue;
-          }
-          if (advertised.execution?.taskSupport === 'required') {
-            warn(`task-required tool skipped: ${advertised.name}`, endpoint.token);
-            continue;
-          }
-          try {
-            assertObjectJsonSchema(advertised.inputSchema);
-            definitions.set(publicName, {
-              rawName: advertised.name,
-              definition: createMcpToolDefinition(ctx, {
-                name: publicName,
-                rawName: advertised.name,
-                description: advertised.description ?? '',
-                inputSchema: advertised.inputSchema,
-                outputSchema: advertised.outputSchema,
-                call: async (args, exec)=>{
-                  try {
-                    return sanitizeResult(await client.callTool({
-                      name: advertised.name,
-                      arguments: args
-                    }, {
-                      signal: exec.signal,
-                      toolDefinition: advertised
-                    }), endpoint.token);
-                  } catch (error) {
-                    throw new Error(safeError(error, endpoint.token));
-                  }
-                }
-              })
-            });
-          } catch (error) {
-            warn(`invalid tool schema skipped (${advertised.name}): ${String(error)}`, endpoint.token);
-          }
-        }
-        if (disposed) return;
-        disposeTools();
-        const nextTools = new Map();
-        for (const [publicName, { definition, rawName }] of definitions){
-          try {
-            nextTools.set(publicName, ctx.tools.register(definition));
-          } catch (error) {
-            warn(`tool registration failed (${rawName}): ${String(error)}`, endpoint.token);
-          }
-        }
-        searchTools = nextTools;
+        if (disposed || current !== generation) return;
+        const definitions = buildToolDefinitions(tools, client, current, endpoint.token);
+        if (disposed || current !== generation) return;
+        if (connectingSearchClient === client) connectingSearchClient = undefined;
         const previous = searchClient;
         searchClient = client;
         retained = true;
+        disposeTools();
+        if (disposed || current !== generation || client !== searchClient) return;
+        searchTools = registerToolDefinitions(definitions, endpoint.token);
+        retryCount = 0;
         await closeClient(previous);
       } finally{
         if (connectingSearchClient === client) connectingSearchClient = undefined;
         if (!retained) await closeClient(client);
       }
     };
-    const attemptInitialConnect = async (endpoint, attempt)=>{
-      if (disposed) return;
-      try {
-        await connectSearch(endpoint);
-      } catch (error) {
-        warn(`initial connection attempt ${attempt} failed: ${String(error)}`, endpoint.token);
-        const delay = SEARCH_RETRY_DELAYS[attempt - 1];
-        if (delay !== undefined && !disposed) {
-          retryTimer = setTimeout(()=>{
-            retryTimer = undefined;
-            void attemptInitialConnect(endpoint, attempt + 1);
-          }, delay);
+    const scheduleRetry = (endpoint, current, attempt, error)=>{
+      warn(`initial connection attempt ${attempt} failed: ${String(error)}`, endpoint.token);
+      const delay = SEARCH_RETRY_DELAYS[attempt - 1];
+      if (delay === undefined || disposed || current !== generation) return;
+      retryTimer = setTimeout(()=>{
+        retryTimer = undefined;
+        void enqueue(async ()=>{
+          if (disposed || current !== generation) return;
+          try {
+            await connectSearch(endpoint, current);
+          } catch (retryError) {
+            scheduleRetry(endpoint, current, attempt + 1, retryError);
+          }
+        });
+      }, delay);
+      retryTimer.unref?.();
+    };
+    const reconcile = async (resetRetry)=>{
+      const enabled = Boolean(read(config.webSearchEnabled));
+      let endpoint;
+      let error;
+      if (enabled) {
+        try {
+          endpoint = resolveGateway(config, searchEndpoint);
+        } catch (caught) {
+          error = caught;
         }
       }
+      const signature = JSON.stringify([
+        enabled,
+        read(config.gatewayUrl),
+        read(config.tokenEnv),
+        read(config.allowInsecureHttp)
+      ]);
+      if (!resetRetry && signature === latestSignature) return;
+      latestSignature = signature;
+      await stopGeneration();
+      const current = generation;
+      if (!enabled) return;
+      if (!endpoint) {
+        warn(`connection configuration failed: ${String(error)}`);
+        return;
+      }
+      try {
+        await connectSearch(endpoint, current);
+      } catch (caught) {
+        scheduleRetry(endpoint, current, 1, caught);
+      }
     };
+    const initialEnabled = Boolean(read(config.webSearchEnabled));
+    let initialEndpoint;
+    let initialError;
+    if (initialEnabled) {
+      try {
+        initialEndpoint = resolveGateway(config, searchEndpoint);
+      } catch (error) {
+        initialError = error;
+      }
+    }
+    latestSignature = JSON.stringify([
+      initialEnabled,
+      read(config.gatewayUrl),
+      read(config.tokenEnv),
+      read(config.allowInsecureHttp)
+    ]);
+    ctx.on('loader/volatile-update', (paths)=>{
+      if (!paths.some((path)=>[
+          'webSearchEnabled',
+          'gatewayUrl',
+          'tokenEnv',
+          'allowInsecureHttp'
+        ].includes(path[0]))) return;
+      void enqueue(()=>reconcile(true));
+    });
     ctx.effect(()=>()=>{
         disposed = true;
-        if (retryTimer !== undefined) clearTimeout(retryTimer);
-        disposeTools();
-        const clients = [
-          searchClient,
-          connectingSearchClient
-        ];
-        searchClient = undefined;
-        connectingSearchClient = undefined;
-        return Promise.all(clients.map(closeClient)).then(()=>undefined);
+        return stopGeneration();
       }, 'magpie.web_search');
-    if (read(config.webSearchEnabled)) {
-      try {
-        const endpoint = resolveGateway(config, searchEndpoint);
-        if (endpoint) await attemptInitialConnect(endpoint, 1);
-      } catch (error) {
-        warn(`initial connection configuration failed: ${String(error)}`);
+    if (initialEnabled) {
+      if (!initialEndpoint) warn(`initial connection configuration failed: ${String(initialError)}`);
+      else {
+        const current = generation;
+        try {
+          await connectSearch(initialEndpoint, current);
+        } catch (error) {
+          scheduleRetry(initialEndpoint, current, 1, error);
+        }
       }
     }
   }
