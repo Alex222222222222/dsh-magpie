@@ -8,6 +8,40 @@ import * as plugin from '../index.js';
 
 const { activate, Config, imageData, sanitizeResult, searchEndpoint, visionEndpoint } = plugin;
 
+const waitFor = async (predicate, message) => {
+  for (let attempt = 0; attempt < 100 && !predicate(); attempt++) await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(predicate(), message);
+};
+
+async function runRetryTest(callback) {
+  const nativeSetTimeout = globalThis.setTimeout;
+  const nativeClearTimeout = globalThis.clearTimeout;
+  const scheduled = [];
+  globalThis.setTimeout = (handler, delay, ...args) => {
+    if (![500, 1_000, 2_000, 4_000, 8_000, 16_000, 30_000].includes(delay)) return nativeSetTimeout(handler, delay, ...args);
+    const timer = { handler: () => handler(...args), delay, cleared: false, unref() { return this; } };
+    scheduled.push(timer);
+    return timer;
+  };
+  globalThis.clearTimeout = (timer) => {
+    if (timer && typeof timer === 'object' && 'cleared' in timer) timer.cleared = true;
+    else nativeClearTimeout(timer);
+  };
+  try {
+    await callback({ scheduled, async runNext() {
+      const timer = scheduled.find((item) => !item.cleared);
+      assert.ok(timer, 'expected a scheduled retry');
+      timer.cleared = true;
+      timer.handler();
+      await new Promise((resolve) => nativeSetTimeout(resolve, 20));
+      return timer.delay;
+    } });
+  } finally {
+    globalThis.setTimeout = nativeSetTimeout;
+    globalThis.clearTimeout = nativeClearTimeout;
+  }
+}
+
 const context = (registered = () => {}, warnings = []) => {
   const sections = new Map();
   const disposers = [];
@@ -34,10 +68,21 @@ const context = (registered = () => {}, warnings = []) => {
 async function mockMcpServer(options = {}) {
   const methods = [];
   const requests = [];
+  const waitForMethod = (method, count) => waitFor(
+    () => methods.filter((item) => item === method).length >= count,
+    `expected ${count} ${method} requests, got ${methods.filter((item) => item === method).length}`
+  );
+  let activeFailures = 0;
+  let maxConcurrentFailures = 0;
+  let releaseFailure;
+  let notifyFailureStarted;
+  const failureStarted = new Promise((resolve) => { notifyFailureStarted = resolve; });
+  const heldFailure = new Promise((resolve) => { releaseFailure = resolve; });
   let finishHeldCall;
   let markCallStarted;
   const callStarted = new Promise((resolve) => { markCallStarted = resolve; });
   const heldCall = new Promise((resolve) => { finishHeldCall = resolve; });
+  const failureCounts = new Map(Object.entries(options.failureCounts ?? {}));
   const server = createServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
@@ -45,6 +90,25 @@ async function mockMcpServer(options = {}) {
     const message = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     methods.push(message.method);
     requests.push({ headers: request.headers, url: request.url, message });
+    for (const waiter of requestWaiters.splice(0)) {
+      if (methods.filter((method) => method === waiter.method).length >= waiter.count) waiter.resolve();
+      else requestWaiters.push(waiter);
+    }
+    const failuresRemaining = failureCounts.get(message.method) ?? 0;
+    if (failuresRemaining > 0) {
+      failureCounts.set(message.method, failuresRemaining - 1);
+      activeFailures++;
+      maxConcurrentFailures = Math.max(maxConcurrentFailures, activeFailures);
+      notifyFailureStarted();
+      if (options.delayFailure) await heldFailure;
+      activeFailures--;
+      if (options.httpFailMethod === message.method) {
+        response.writeHead(500, { 'content-type': 'text/plain' }).end(options.errorBody ?? 'mock failure');
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ jsonrpc: '2.0', id: message.id, error: { code: -32000, message: options.errorBody ?? 'mock failure' } }));
+      return;
+    }
     if (message.method === 'notifications/initialized') { response.writeHead(202).end(); return; }
     if (options.httpFailMethod === message.method) {
       markCallStarted();
@@ -69,10 +133,15 @@ async function mockMcpServer(options = {}) {
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   return {
-    methods, requests, callStarted,
+    methods, requests, callStarted, failureStarted, waitForMethod,
+    get maxConcurrentFailures() { return maxConcurrentFailures; },
     releaseCall: () => finishHeldCall(),
+    releaseFailure: () => releaseFailure(),
     gatewayUrl: `http://127.0.0.1:${server.address().port}`,
-    close: () => new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
+    close: () => new Promise((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+      server.closeAllConnections();
+    })
   };
 }
 
@@ -336,6 +405,110 @@ test('web search skips invalid schemas, task-required tools, and individual regi
     assert.match(warnings.join('\n'), /task_required/);
     assert.match(warnings.join('\n'), /conflict/);
   } finally {
+    await ctx.cleanup();
+    await mock.close();
+    if (previous === undefined) delete process.env.MAGPIE_VISION_SELF_CHECK;
+    else process.env.MAGPIE_VISION_SELF_CHECK = previous;
+  }
+});
+
+test('web search initial list failures retry and recover without overlapping requests', async () => {
+  const previous = process.env.MAGPIE_VISION_SELF_CHECK;
+  process.env.MAGPIE_VISION_SELF_CHECK = 'search-self-check-token';
+  const mock = await mockMcpServer({ failureCounts: { 'tools/list': 1 }, delayFailure: true, errorBody: 'search-self-check-token list rejected', tools: [{ name: 'web_search', inputSchema: { type: 'object', properties: {} } }] });
+  const warnings = [];
+  const registered = [];
+  let resolveRegistration;
+  const registration = new Promise((resolve) => { resolveRegistration = resolve; });
+  const ctx = context((tool) => { registered.push(tool); resolveRegistration(); }, warnings);
+  try {
+    const activation = activate(ctx, { enabled: false, webSearchEnabled: true, gatewayUrl: mock.gatewayUrl, tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: true });
+    await mock.failureStarted;
+    assert.deepEqual(mock.methods, ['initialize', 'notifications/initialized', 'tools/list']);
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    assert.deepEqual(mock.methods, ['initialize', 'notifications/initialized', 'tools/list'], 'retry waits until the failed request settles');
+    mock.releaseFailure();
+    await activation;
+    await mock.waitForMethod('tools/list', 2);
+    await registration;
+    assert.equal(mock.methods.filter((method) => method === 'initialize').length, 2);
+    assert.equal(mock.maxConcurrentFailures, 1);
+    assert.match(warnings.join('\n'), /web search.*\[redacted\] list rejected/i);
+    assert.doesNotMatch(warnings.join('\n'), /search-self-check-token/);
+  } finally {
+    mock.releaseFailure();
+    await ctx.cleanup();
+    await mock.close();
+    if (previous === undefined) delete process.env.MAGPIE_VISION_SELF_CHECK;
+    else process.env.MAGPIE_VISION_SELF_CHECK = previous;
+  }
+});
+
+test('web search initial failures retry ten times then stop at capped backoff', async () => {
+  const previous = process.env.MAGPIE_VISION_SELF_CHECK;
+  process.env.MAGPIE_VISION_SELF_CHECK = 'search-self-check-token';
+  const mock = await mockMcpServer({ failureCounts: { initialize: 10 }, errorBody: 'search-self-check-token connect rejected' });
+  const warnings = [];
+  const ctx = context(() => {}, warnings);
+  try {
+    await runRetryTest(async ({ scheduled, runNext }) => {
+      await activate(ctx, { enabled: false, webSearchEnabled: true, gatewayUrl: mock.gatewayUrl, tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: true });
+      const delays = [];
+      for (let attempt = 2; attempt <= 10; attempt++) {
+        delays.push(await runNext());
+        await mock.waitForMethod('initialize', attempt);
+        await waitFor(() => warnings.filter((line) => /initial connection attempt/.test(line)).length >= attempt, `attempt ${attempt} should settle before scheduling the next retry`);
+      }
+      assert.deepEqual(delays, [500, 1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000, 30_000]);
+      assert.equal(mock.methods.filter((method) => method === 'initialize').length, 10);
+      assert.equal(scheduled.filter(({ cleared }) => !cleared).length, 0);
+      assert.doesNotMatch(warnings.join('\n'), /search-self-check-token/);
+    });
+  } finally {
+    await ctx.cleanup();
+    await mock.close();
+    if (previous === undefined) delete process.env.MAGPIE_VISION_SELF_CHECK;
+    else process.env.MAGPIE_VISION_SELF_CHECK = previous;
+  }
+});
+
+test('web search cleanup cancels a pending retry timer', async () => {
+  const previous = process.env.MAGPIE_VISION_SELF_CHECK;
+  process.env.MAGPIE_VISION_SELF_CHECK = 'search-self-check-token';
+  const mock = await mockMcpServer({ failMethod: 'tools/list', errorBody: 'temporary list failure' });
+  const ctx = context();
+  try {
+    await runRetryTest(async ({ scheduled }) => {
+      await activate(ctx, { enabled: false, webSearchEnabled: true, gatewayUrl: mock.gatewayUrl, tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: true });
+      assert.deepEqual(mock.methods, ['initialize', 'notifications/initialized', 'tools/list']);
+      assert.equal(scheduled.filter(({ cleared }) => !cleared).length, 1);
+      await ctx.cleanup();
+      assert.equal(scheduled.filter(({ cleared }) => !cleared).length, 0);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    assert.deepEqual(mock.methods, ['initialize', 'notifications/initialized', 'tools/list']);
+  } finally {
+    await ctx.cleanup();
+    await mock.close();
+    if (previous === undefined) delete process.env.MAGPIE_VISION_SELF_CHECK;
+    else process.env.MAGPIE_VISION_SELF_CHECK = previous;
+  }
+});
+
+test('web search cleanup closes an in-flight client', async () => {
+  const previous = process.env.MAGPIE_VISION_SELF_CHECK;
+  process.env.MAGPIE_VISION_SELF_CHECK = 'search-self-check-token';
+  const mock = await mockMcpServer({ failureCounts: { 'tools/list': 1 }, delayFailure: true });
+  const ctx = context();
+  try {
+    const activation = activate(ctx, { enabled: false, webSearchEnabled: true, gatewayUrl: mock.gatewayUrl, tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: true });
+    await mock.failureStarted;
+    await ctx.cleanup();
+    await assert.doesNotReject(activation);
+    mock.releaseFailure();
+    assert.deepEqual(mock.methods, ['initialize', 'notifications/initialized', 'tools/list']);
+  } finally {
+    mock.releaseFailure();
     await ctx.cleanup();
     await mock.close();
     if (previous === undefined) delete process.env.MAGPIE_VISION_SELF_CHECK;

@@ -138,6 +138,17 @@ function jsonArray(value) {
 function textFromResult(result) {
   return result.content.filter((block)=>block.type === 'text' && typeof block.text === 'string').map((block)=>block.text).join('\n');
 }
+const SEARCH_RETRY_DELAYS = [
+  500,
+  1_000,
+  2_000,
+  4_000,
+  8_000,
+  16_000,
+  30_000,
+  30_000,
+  30_000
+];
 export async function activate(ctx, config) {
   if (read(config.allowInsecureHttp) && (config.enabled || read(config.webSearchEnabled))) {
     ctx.logger('magpie').warn('magpie: allowInsecureHttp is enabled; if HTTP is used, the bearer credential may be exposed in transit');
@@ -158,11 +169,21 @@ export async function activate(ctx, config) {
   if (config.webSearchEnabled !== undefined) {
     const logger = ctx.logger('magpie');
     let searchClient;
+    let connectingSearchClient;
+    let searchToken = '';
     let searchTools = new Map();
+    let retryTimer;
     let disposed = false;
-    const warn = (message, token = '')=>logger.warn(`magpie web search: ${safeError(message, token)}`);
-    const closeClient = async (client)=>{
-      if (client) await client.close().catch(()=>{});
+    const warn = (message, token = searchToken)=>logger.warn(`magpie web search: ${safeError(message, token)}`);
+    const closingClients = new WeakMap();
+    const closeClient = (client)=>{
+      if (!client) return Promise.resolve();
+      let closing = closingClients.get(client);
+      if (!closing) {
+        closing = client.close().catch(()=>{});
+        closingClients.set(client, closing);
+      }
+      return closing;
     };
     const disposeTools = ()=>{
       for (const dispose of searchTools.values()){
@@ -174,14 +195,14 @@ export async function activate(ctx, config) {
       }
       searchTools.clear();
     };
-    const connectSearch = async ()=>{
+    const connectSearch = async (endpoint)=>{
       if (disposed) return;
-      const endpoint = resolveGateway(config, searchEndpoint);
-      if (!endpoint) return;
+      searchToken = endpoint.token;
       const client = new Client({
         name: 'dsh-magpie-search',
         version: '1.0.0'
       });
+      connectingSearchClient = client;
       let retained = false;
       try {
         await client.connect(new StreamableHTTPClientTransport(endpoint.url, {
@@ -249,25 +270,43 @@ export async function activate(ctx, config) {
         retained = true;
         await closeClient(previous);
       } finally{
+        if (connectingSearchClient === client) connectingSearchClient = undefined;
         if (!retained) await closeClient(client);
+      }
+    };
+    const attemptInitialConnect = async (endpoint, attempt)=>{
+      if (disposed) return;
+      try {
+        await connectSearch(endpoint);
+      } catch (error) {
+        warn(`initial connection attempt ${attempt} failed: ${String(error)}`, endpoint.token);
+        const delay = SEARCH_RETRY_DELAYS[attempt - 1];
+        if (delay !== undefined && !disposed) {
+          retryTimer = setTimeout(()=>{
+            retryTimer = undefined;
+            void attemptInitialConnect(endpoint, attempt + 1);
+          }, delay);
+        }
       }
     };
     ctx.effect(()=>()=>{
         disposed = true;
+        if (retryTimer !== undefined) clearTimeout(retryTimer);
         disposeTools();
-        const client = searchClient;
+        const clients = [
+          searchClient,
+          connectingSearchClient
+        ];
         searchClient = undefined;
-        return closeClient(client);
+        connectingSearchClient = undefined;
+        return Promise.all(clients.map(closeClient)).then(()=>undefined);
       }, 'magpie.web_search');
     if (read(config.webSearchEnabled)) {
       try {
-        await connectSearch();
+        const endpoint = resolveGateway(config, searchEndpoint);
+        if (endpoint) await attemptInitialConnect(endpoint, 1);
       } catch (error) {
-        let token = '';
-        try {
-          token = resolveGateway(config, searchEndpoint)?.token ?? '';
-        } catch  {}
-        warn(`initial connection failed: ${String(error)}`, token);
+        warn(`initial connection configuration failed: ${String(error)}`);
       }
     }
   }
