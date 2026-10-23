@@ -12,6 +12,11 @@ const waitFor = async (predicate, message) => {
   for (let attempt = 0; attempt < 100 && !predicate(); attempt++) await new Promise((resolve) => setImmediate(resolve));
   assert.ok(predicate(), message);
 };
+const waitForAsync = async (predicate, message) => {
+  const deadline = Date.now() + 3_000;
+  while (!predicate() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.ok(predicate(), message);
+};
 
 async function runRetryTest(callback) {
   const nativeSetTimeout = globalThis.setTimeout;
@@ -45,10 +50,21 @@ async function runRetryTest(callback) {
 const context = (registered = () => {}, warnings = []) => {
   const sections = new Map();
   const disposers = [];
+  const listeners = new Map();
+  const toolMap = new Map();
   return {
     tools: {
-      register(tool) { registered(tool); return () => {}; },
-      get(name, scope) { return name === 'analyze_image' && !(scope && scope.hidden) ? { name } : undefined; }
+      register(tool) {
+        registered(tool);
+        if (toolMap.has(tool.name)) throw new Error(`duplicate tool registration: ${tool.name}`);
+        toolMap.set(tool.name, tool);
+        return () => toolMap.delete(tool.name);
+      },
+      get(name, scope) {
+        if (scope?.hidden && (name === 'analyze_image' || name.startsWith('mcp__magpie_search__'))) return undefined;
+        return name === 'analyze_image' ? { name } : toolMap.get(name);
+      },
+      schemas(scope) { return [...toolMap.keys()].filter((name) => !(scope?.hidden && name.startsWith('mcp__magpie_search__'))).map((name) => ({ name })); }
     },
     systemPrompt: {
       section(section) {
@@ -61,6 +77,13 @@ const context = (registered = () => {}, warnings = []) => {
     sections,
     logger: Object.assign(() => ({ warn(message) { warnings.push(message); } }), { warn() {} }),
     effect(callback) { disposers.push(callback()); },
+    on(name, listener) {
+      let entries = listeners.get(name);
+      if (!entries) listeners.set(name, entries = new Set());
+      entries.add(listener);
+      return () => entries.delete(listener);
+    },
+    emit(name, ...args) { for (const listener of listeners.get(name) ?? []) listener(...args); },
     async cleanup() { for (const dispose of disposers.splice(0).reverse()) await dispose(); }
   };
 };
@@ -68,6 +91,14 @@ const context = (registered = () => {}, warnings = []) => {
 async function mockMcpServer(options = {}) {
   const methods = [];
   const requests = [];
+  let currentTools = options.tools;
+  let sseResponse;
+  let serverNotificationId = 1000;
+  const replaceTools = (tools) => { currentTools = tools; };
+  const notify = (method, params = {}) => {
+    assert.ok(sseResponse, 'MCP notification stream is not active');
+    sseResponse.write(`id: ${serverNotificationId++}\ndata: ${JSON.stringify({ jsonrpc: '2.0', method, params })}\n\n`);
+  };
   const waitForMethod = (method, count) => waitFor(
     () => methods.filter((item) => item === method).length >= count,
     `expected ${count} ${method} requests, got ${methods.filter((item) => item === method).length}`
@@ -83,7 +114,15 @@ async function mockMcpServer(options = {}) {
   const callStarted = new Promise((resolve) => { markCallStarted = resolve; });
   const heldCall = new Promise((resolve) => { finishHeldCall = resolve; });
   const failureCounts = new Map(Object.entries(options.failureCounts ?? {}));
+  let failureMethods = options.failureMethods ?? [];
   const server = createServer(async (request, response) => {
+    if (request.method === 'GET') {
+      response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
+      response.write(': connected\\n\\n');
+      sseResponse = response;
+      request.on('close', () => { if (sseResponse === response) sseResponse = undefined; });
+      return;
+    }
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
     if (chunks.length === 0) { response.writeHead(202).end(); return; }
@@ -91,8 +130,8 @@ async function mockMcpServer(options = {}) {
     methods.push(message.method);
     requests.push({ headers: request.headers, url: request.url, message });
     const failuresRemaining = failureCounts.get(message.method) ?? 0;
-    if (failuresRemaining > 0) {
-      failureCounts.set(message.method, failuresRemaining - 1);
+    if (failuresRemaining > 0 || failureMethods.includes(message.method)) {
+      if (failuresRemaining > 0) failureCounts.set(message.method, failuresRemaining - 1);
       activeFailures++;
       maxConcurrentFailures = Math.max(maxConcurrentFailures, activeFailures);
       notifyFailureStarted();
@@ -117,8 +156,8 @@ async function mockMcpServer(options = {}) {
       return;
     }
     let result;
-    if (message.method === 'initialize') result = { protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'mock', version: '1' } };
-    else if (message.method === 'tools/list') result = { tools: options.tools ?? [{ name: 'analyze_image', description: 'mock', inputSchema: { type: 'object', properties: { image: { type: 'string' }, prompt: { type: 'string' } }, required: ['image'] } }] };
+    if (message.method === 'initialize') result = { protocolVersion: '2025-03-26', capabilities: { tools: options.listChanged ? { listChanged: true } : {} }, serverInfo: { name: 'mock', version: '1' } };
+    else if (message.method === 'tools/list') result = { tools: currentTools ?? [{ name: 'analyze_image', description: 'mock', inputSchema: { type: 'object', properties: { image: { type: 'string' }, prompt: { type: 'string' } }, required: ['image'] } }] };
     else if (message.method === 'tools/call') {
       markCallStarted();
       if (options.holdCall) await heldCall;
@@ -129,8 +168,10 @@ async function mockMcpServer(options = {}) {
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   return {
-    methods, requests, callStarted, failureStarted, waitForMethod,
+    methods, requests, callStarted, failureStarted, waitForMethod, replaceTools, notify,
+    failMethods(methods) { failureMethods = methods; },
     get maxConcurrentFailures() { return maxConcurrentFailures; },
+    get notificationStreamReady() { return sseResponse !== undefined; },
     releaseCall: () => finishHeldCall(),
     releaseFailure: () => releaseFailure(),
     gatewayUrl: `http://127.0.0.1:${server.address().port}`,
@@ -560,6 +601,233 @@ test('web search list failures preserve image activation and redact bearer diagn
     await mock.close();
     if (previous === undefined) delete process.env.MAGPIE_VISION_SELF_CHECK;
     else process.env.MAGPIE_VISION_SELF_CHECK = previous;
+  }
+});
+
+test('web search live toggle connects and unregisters tools without restart', async () => {
+  const previous = process.env.MAGPIE_VISION_SELF_CHECK;
+  process.env.MAGPIE_VISION_SELF_CHECK = 'search-self-check-token';
+  const mock = await mockMcpServer({ tools: [{ name: 'web_search', inputSchema: { type: 'object', properties: {} } }] });
+  let enabled = false;
+  const registered = [];
+  const ctx = context((tool) => registered.push(tool));
+  try {
+    const config = { enabled: false, webSearchEnabled: { get: () => enabled }, webSearchInstructionMode: { get: () => 'normal' }, gatewayUrl: { get: () => mock.gatewayUrl }, tokenEnv: { get: () => 'MAGPIE_VISION_SELF_CHECK' }, allowInsecureHttp: { get: () => true } };
+    await activate(ctx, config);
+    assert.deepEqual(mock.methods, []);
+    enabled = true;
+    ctx.emit('loader/volatile-update', [['webSearchEnabled']]);
+    await waitForAsync(() => mock.methods.filter((method) => method === 'tools/list').length >= 1, 'live enable should call tools/list');
+    await waitForAsync(() => registered.some((tool) => tool.name === 'mcp__magpie_search__web_search'), 'search tool should register after live enable');
+    enabled = false;
+    ctx.emit('loader/volatile-update', [['webSearchEnabled']]);
+    await waitFor(() => !ctx.tools.get('mcp__magpie_search__web_search'), 'search tool should unregister after live disable');
+    const requestCount = mock.methods.length;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(mock.methods.length, requestCount);
+  } finally {
+    await ctx.cleanup();
+    await mock.close();
+    if (previous === undefined) delete process.env.MAGPIE_VISION_SELF_CHECK;
+    else process.env.MAGPIE_VISION_SELF_CHECK = previous;
+  }
+});
+
+test('web search reconnects when the shared gateway changes while enabled', async () => {
+  const previous = process.env.MAGPIE_VISION_SELF_CHECK;
+  process.env.MAGPIE_VISION_SELF_CHECK = 'search-self-check-token';
+  const first = await mockMcpServer({ tools: [{ name: 'search_one', inputSchema: { type: 'object', properties: {} } }] });
+  const second = await mockMcpServer({ tools: [{ name: 'search_two', inputSchema: { type: 'object', properties: {} } }] });
+  let gateway = first.gatewayUrl;
+  const ctx = context();
+  try {
+    await activate(ctx, { enabled: false, webSearchEnabled: true, gatewayUrl: { get: () => gateway }, tokenEnv: { get: () => 'MAGPIE_VISION_SELF_CHECK' }, allowInsecureHttp: { get: () => true } });
+    await first.waitForMethod('tools/list', 1);
+    await waitForAsync(() => ctx.tools.get('mcp__magpie_search__search_one'), 'initial search tool should register');
+    gateway = second.gatewayUrl;
+    ctx.emit('loader/volatile-update', [['gatewayUrl']]);
+    await second.waitForMethod('tools/list', 1);
+    await waitForAsync(() => ctx.tools.get('mcp__magpie_search__search_two'), 'new gateway search tool should register');
+    assert.equal(ctx.tools.get('mcp__magpie_search__search_one'), undefined);
+  } finally {
+    await ctx.cleanup();
+    await first.close();
+    await second.close();
+    if (previous === undefined) delete process.env.MAGPIE_VISION_SELF_CHECK;
+    else process.env.MAGPIE_VISION_SELF_CHECK = previous;
+  }
+});
+
+test('web search disable closes an initial connection still waiting for tools/list', async () => {
+  const previous = process.env.MAGPIE_VISION_SELF_CHECK;
+  process.env.MAGPIE_VISION_SELF_CHECK = 'search-self-check-token';
+  const mock = await mockMcpServer({ failureCounts: { 'tools/list': 1 }, delayFailure: true, tools: [{ name: 'should_not_publish', inputSchema: { type: 'object', properties: {} } }] });
+  const ctx = context();
+  try {
+    let enabled = true;
+    const activation = activate(ctx, { enabled: false, webSearchEnabled: { get: () => enabled }, gatewayUrl: mock.gatewayUrl, tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: true });
+    await mock.failureStarted;
+    enabled = false;
+    ctx.emit('loader/volatile-update', [['webSearchEnabled']]);
+    mock.releaseFailure();
+    await activation;
+    await waitFor(() => mock.methods.filter((method) => method === 'tools/list').length === 1, 'stale connection should not retry after disable');
+    assert.equal(ctx.tools.get('mcp__magpie_search__should_not_publish'), undefined);
+  } finally {
+    mock.releaseFailure();
+    await ctx.cleanup();
+    await mock.close();
+    if (previous === undefined) delete process.env.MAGPIE_VISION_SELF_CHECK;
+    else process.env.MAGPIE_VISION_SELF_CHECK = previous;
+  }
+});
+
+test('web search refreshes advertised tools after tools/list_changed notification', async () => {
+  const previous = process.env.MAGPIE_VISION_SELF_CHECK;
+  process.env.MAGPIE_VISION_SELF_CHECK = 'search-self-check-token';
+  const mock = await mockMcpServer({ listChanged: true, tools: [{ name: 'search_one', inputSchema: { type: 'object', properties: {} } }] });
+  const registered = [];
+  const ctx = context((tool) => registered.push(tool));
+  try {
+    await activate(ctx, { enabled: false, webSearchEnabled: true, gatewayUrl: mock.gatewayUrl, tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: true });
+    await waitFor(() => registered.some((tool) => tool.name === 'mcp__magpie_search__search_one'), 'initial search tool should register');
+    await waitFor(() => mock.notificationStreamReady, 'client should establish the MCP notification stream');
+    mock.replaceTools([{ name: 'search_two', inputSchema: { type: 'object', properties: {} } }]);
+    mock.notify('notifications/tools/list_changed');
+    await mock.waitForMethod('tools/list', 2);
+    await waitFor(() => ctx.tools.get('mcp__magpie_search__search_two'), 'changed search tool should register');
+    assert.equal(ctx.tools.get('mcp__magpie_search__search_one'), undefined);
+  } finally {
+    await ctx.cleanup();
+    await mock.close();
+    if (previous === undefined) delete process.env.MAGPIE_VISION_SELF_CHECK;
+    else process.env.MAGPIE_VISION_SELF_CHECK = previous;
+  }
+});
+
+test('web search retains the previous tool generation when a list refresh fails', async () => {
+  const previous = process.env.MAGPIE_VISION_SELF_CHECK;
+  process.env.MAGPIE_VISION_SELF_CHECK = 'search-self-check-token';
+  const mock = await mockMcpServer({ listChanged: true, tools: [{ name: 'search_before', inputSchema: { type: 'object', properties: {} } }] });
+  const ctx = context();
+  try {
+    await activate(ctx, { enabled: false, webSearchEnabled: true, gatewayUrl: mock.gatewayUrl, tokenEnv: 'MAGPIE_VISION_SELF_CHECK', allowInsecureHttp: true });
+    await waitFor(() => ctx.tools.get('mcp__magpie_search__search_before'), 'initial search tool should register');
+    await waitFor(() => mock.notificationStreamReady, 'MCP notification stream should be active');
+    mock.failMethods(['tools/list']);
+    mock.replaceTools([{ name: 'search_after', inputSchema: { type: 'object', properties: {} } }]);
+    mock.notify('notifications/tools/list_changed');
+    await mock.waitForMethod('tools/list', 2);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.ok(ctx.tools.get('mcp__magpie_search__search_before'));
+    assert.equal(ctx.tools.get('mcp__magpie_search__search_after'), undefined);
+  } finally {
+    await ctx.cleanup();
+    await mock.close();
+    if (previous === undefined) delete process.env.MAGPIE_VISION_SELF_CHECK;
+    else process.env.MAGPIE_VISION_SELF_CHECK = previous;
+  }
+});
+
+test('web search disable aborts an in-flight tool call and releases client', async () => {
+  const previous = process.env.MAGPIE_VISION_SELF_CHECK;
+  process.env.MAGPIE_VISION_SELF_CHECK = 'search-self-check-token';
+  const mock = await mockMcpServer({
+    holdCall: true,
+    tools: [{ name: 'slow_search', inputSchema: { type: 'object', properties: {} } }]
+  });
+  let enabled = true;
+  let tool;
+  const ctx = context((registered) => { tool = registered; });
+  try {
+    await activate(ctx, {
+      enabled: false,
+      webSearchEnabled: { get: () => enabled },
+      gatewayUrl: mock.gatewayUrl,
+      tokenEnv: 'MAGPIE_VISION_SELF_CHECK',
+      allowInsecureHttp: true
+    });
+    await mock.waitForMethod('tools/list', 1);
+    assert.ok(tool);
+    const pending = tool.execute({}, { signal: new AbortController().signal });
+    await mock.callStarted;
+    enabled = false;
+    ctx.emit('loader/volatile-update', [['webSearchEnabled']]);
+    await assert.rejects(pending, /cancelled|stopped|shutting down|abort/i);
+    mock.releaseCall();
+  } finally {
+    mock.releaseCall();
+    await ctx.cleanup();
+    await mock.close();
+    if (previous === undefined) delete process.env.MAGPIE_VISION_SELF_CHECK;
+    else process.env.MAGPIE_VISION_SELF_CHECK = previous;
+  }
+});
+
+test('web search plugin cleanup aborts an in-flight search call', async () => {
+  const previous = process.env.MAGPIE_VISION_SELF_CHECK;
+  process.env.MAGPIE_VISION_SELF_CHECK = 'search-self-check-token';
+  const mock = await mockMcpServer({
+    holdCall: true,
+    tools: [{ name: 'slow_search', inputSchema: { type: 'object', properties: {} } }]
+  });
+  let tool;
+  const ctx = context((registered) => { tool = registered; });
+  try {
+    await activate(ctx, {
+      enabled: false,
+      webSearchEnabled: true,
+      gatewayUrl: mock.gatewayUrl,
+      tokenEnv: 'MAGPIE_VISION_SELF_CHECK',
+      allowInsecureHttp: true
+    });
+    await mock.waitForMethod('tools/list', 1);
+    assert.ok(tool);
+    const pending = tool.execute({}, { signal: new AbortController().signal });
+    await mock.callStarted;
+    const cleanup = ctx.cleanup();
+    await assert.rejects(pending, /cancelled|stopped|shutting down|abort/i);
+    await cleanup;
+    mock.releaseCall();
+  } finally {
+    mock.releaseCall();
+    await ctx.cleanup();
+    await mock.close();
+    if (previous === undefined) delete process.env.MAGPIE_VISION_SELF_CHECK;
+    else process.env.MAGPIE_VISION_SELF_CHECK = previous;
+  }
+});
+
+test('web search reconnects when tokenEnv or allowInsecureHttp changes', async () => {
+  const previousOne = process.env.MAGPIE_TOKEN_ONE;
+  const previousTwo = process.env.MAGPIE_TOKEN_TWO;
+  process.env.MAGPIE_TOKEN_ONE = 'token-one-val';
+  process.env.MAGPIE_TOKEN_TWO = 'token-two-val';
+  const mock = await mockMcpServer({ tools: [{ name: 'search_tool', inputSchema: { type: 'object', properties: {} } }] });
+  let tokenEnv = 'MAGPIE_TOKEN_ONE';
+  let allowInsecureHttp = true;
+  const ctx = context();
+  try {
+    await activate(ctx, {
+      enabled: false,
+      webSearchEnabled: true,
+      gatewayUrl: mock.gatewayUrl,
+      tokenEnv: { get: () => tokenEnv },
+      allowInsecureHttp: { get: () => allowInsecureHttp }
+    });
+    await mock.waitForMethod('tools/list', 1);
+    assert.equal(mock.requests[0].headers.authorization, 'Bearer token-one-val');
+
+    tokenEnv = 'MAGPIE_TOKEN_TWO';
+    ctx.emit('loader/volatile-update', [['tokenEnv']]);
+    await mock.waitForMethod('tools/list', 2);
+    const secondReq = mock.requests.filter((r) => r.message.method === 'initialize')[1];
+    assert.equal(secondReq.headers.authorization, 'Bearer token-two-val');
+  } finally {
+    await ctx.cleanup();
+    await mock.close();
+    if (previousOne === undefined) delete process.env.MAGPIE_TOKEN_ONE; else process.env.MAGPIE_TOKEN_ONE = previousOne;
+    if (previousTwo === undefined) delete process.env.MAGPIE_TOKEN_TWO; else process.env.MAGPIE_TOKEN_TWO = previousTwo;
   }
 });
 
