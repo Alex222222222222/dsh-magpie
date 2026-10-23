@@ -72,8 +72,8 @@ const t = (key) => messages[key];
 const copies = {
   ready: {
     status: 'ready',
-    value: { gatewayUrl: 'https://magpie-gateway.alex1222.com/', tokenEnv: 'MAGPIE_API_KEY', instructionMode: 'suggest', allowInsecureHttp: false },
-    base: { gatewayUrl: 'https://composed.example/', instructionMode: 'normal', tokenEnv: 'MAGPIE_API_KEY', allowInsecureHttp: false },
+    value: { gatewayUrl: 'https://magpie-gateway.alex1222.com/', tokenEnv: 'MAGPIE_API_KEY', instructionMode: 'suggest', allowInsecureHttp: false, webSearchEnabled: false, webSearchInstructionMode: 'normal' },
+    base: { gatewayUrl: 'https://composed.example/', instructionMode: 'normal', tokenEnv: 'MAGPIE_API_KEY', allowInsecureHttp: false, webSearchEnabled: false, webSearchInstructionMode: 'normal' },
     user: { instructionMode: 'suggest' },
     writable: true,
     revision: 7
@@ -137,7 +137,7 @@ test('an unavailable deployment reports it instead of a form', () => {
   assert.equal(text(tree), messages.unavailable);
 });
 
-test('the page stages all four settings and saves them in one revision-fenced write', async () => {
+test('the page stages all six settings and saves them in one revision-fenced write', async () => {
   freshRender();
   const calls = [];
   const form = { state: copies.ready, mutate: async (ops, revision) => { calls.push({ ops, revision }); return true; } };
@@ -146,19 +146,28 @@ test('the page stages all four settings and saves them in one revision-fenced wr
   const inputs = findAll(tree, 'Input');
   assert.equal(inputs.length, 2);
   const segmented = findAll(tree, 'SegmentedControl');
-  assert.equal(segmented.length, 1);
+  assert.equal(segmented.length, 2);
   assert.equal(segmented[0].props.value, 'suggest');
+  assert.equal(segmented[1].props.value, 'normal');
   const toggle = findAll(tree, 'Switch');
-  assert.equal(toggle.length, 1);
+  assert.equal(toggle.length, 2);
   assert.equal(toggle[0].props.checked, false);
+  assert.equal(toggle[1].props.checked, false);
 
   // Edit gatewayUrl
   inputs[0].props.onChange({ target: { value: 'https://other.example' } });
   // Edit allowInsecureHttp
   toggle[0].props.onChange(true);
+  // Edit webSearchEnabled
+  toggle[1].props.onChange(true);
+  // Edit webSearchInstructionMode
+  segmented[1].props.onChange('force');
+
   tree = render({ t, view: 'page', form });
   assert.equal(findAll(tree, 'Input')[0].props.value, 'https://other.example');
   assert.equal(findAll(tree, 'Switch')[0].props.checked, true);
+  assert.equal(findAll(tree, 'Switch')[1].props.checked, true);
+  assert.equal(findAll(tree, 'SegmentedControl')[1].props.value, 'force');
 
   await buttonByText(tree, messages.save).props.onClick();
   assert.deepEqual(calls, [{
@@ -166,7 +175,9 @@ test('the page stages all four settings and saves them in one revision-fenced wr
       { op: 'set', path: ['gatewayUrl'], value: 'https://other.example' },
       { op: 'set', path: ['tokenEnv'], value: 'MAGPIE_API_KEY' },
       { op: 'set', path: ['instructionMode'], value: 'suggest' },
-      { op: 'set', path: ['allowInsecureHttp'], value: true }
+      { op: 'set', path: ['allowInsecureHttp'], value: true },
+      { op: 'set', path: ['webSearchEnabled'], value: true },
+      { op: 'set', path: ['webSearchInstructionMode'], value: 'force' }
     ],
     revision: 7
   }]);
@@ -190,11 +201,14 @@ test('discard resets drafts back to stored snapshot values', async () => {
   const form = { state: copies.ready, mutate: async () => false };
   let tree = render({ t, view: 'page', form });
   findAll(tree, 'Input')[0].props.onChange({ target: { value: 'https://temporary.example' } });
+  findAll(tree, 'Switch')[1].props.onChange(true);
   tree = render({ t, view: 'page', form });
   assert.equal(findAll(tree, 'Input')[0].props.value, 'https://temporary.example');
+  assert.equal(findAll(tree, 'Switch')[1].props.checked, true);
   buttonByText(tree, messages.discard).props.onClick();
   tree = render({ t, view: 'page', form });
   assert.equal(findAll(tree, 'Input')[0].props.value, 'https://magpie-gateway.alex1222.com/');
+  assert.equal(findAll(tree, 'Switch')[1].props.checked, false);
 });
 
 test('a read-only document disables the controls and says so', () => {

@@ -19,6 +19,11 @@ window.__ModuleLoader__.load({
 			instructionModeHint: "normal adds no prompt text; suggest recommends the tool; force requires using it for image inspection.",
 			allowInsecureHttp: "Allow plain HTTP",
 			allowInsecureHttpHint: "Permit an http gateway; the bearer key will travel unencrypted.",
+			webSearchHeading: "Web search",
+			webSearchEnabled: "Enable web search",
+			webSearchEnabledHint: "Connect to the Magpie web search endpoint and expose search tools to agents.",
+			webSearchInstructionMode: "Web search instructions",
+			webSearchInstructionModeHint: "normal adds no prompt text; suggest recommends search tools; force requires using them for web research.",
 			invalidGateway: "Enter an absolute http or https URL.",
 			invalidTokenEnv: "Enter an environment-variable name (letters, digits, underscore).",
 			save: "Save",
@@ -39,6 +44,11 @@ window.__ModuleLoader__.load({
 			instructionModeHint: "normal 不添加系统提示；suggest 推荐使用；force 强制要求在图像分析时使用。",
 			allowInsecureHttp: "允许明文 HTTP",
 			allowInsecureHttpHint: "允许 http 网关；此时 bearer 密钥将明文传输。",
+			webSearchHeading: "网页搜索",
+			webSearchEnabled: "启用网页搜索",
+			webSearchEnabledHint: "连接 Magpie 网页搜索端点并向 Agent 提供搜索工具。",
+			webSearchInstructionMode: "网页搜索指令",
+			webSearchInstructionModeHint: "normal 不添加系统提示；suggest 推荐使用；force 强制要求在网页调研时使用。",
 			invalidGateway: "请填写 http 或 https 绝对地址。",
 			invalidTokenEnv: "请填写合法的环境变量名（字母、数字、下划线）。",
 			save: "保存",
@@ -52,7 +62,7 @@ window.__ModuleLoader__.load({
 		const NS = "settings.magpie";
 		const PKG = "@alex222222222222/magpie";
 		const ROW = "magpie";
-		const FIELD_ORDER = ["gatewayUrl", "tokenEnv", "instructionMode", "allowInsecureHttp"];
+		const FIELD_ORDER = ["gatewayUrl", "tokenEnv", "instructionMode", "allowInsecureHttp", "webSearchEnabled", "webSearchInstructionMode"];
 		const MODES = ["normal", "suggest", "force"];
 
 		/** One field's stored value from the form snapshot, unwrapping the section object. */
@@ -63,8 +73,12 @@ window.__ModuleLoader__.load({
 
 		/** Draft text for one field, matching how the field renders its stored value. */
 		function draftText(value, field) {
-			if (value === undefined || value === null) return "";
-			if (field === "allowInsecureHttp") return value === true ? "true" : "false";
+			if (value === undefined || value === null) {
+				if (field === "webSearchEnabled") return "false";
+				if (field === "webSearchInstructionMode") return "normal";
+				return "";
+			}
+			if (field === "allowInsecureHttp" || field === "webSearchEnabled") return value === true ? "true" : "false";
 			return String(value);
 		}
 
@@ -79,7 +93,7 @@ window.__ModuleLoader__.load({
 				if (trimmed === "") return { op: "unset", path: [field] };
 				return /^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed) ? { op: "set", path: [field], value: trimmed } : undefined;
 			}
-			if (field === "instructionMode") {
+			if (field === "instructionMode" || field === "webSearchInstructionMode") {
 				return MODES.includes(trimmed) ? { op: "set", path: [field], value: trimmed } : undefined;
 			}
 			return trimmed === "true" || trimmed === "false" ? { op: "set", path: [field], value: trimmed === "true" } : undefined;
@@ -191,6 +205,39 @@ window.__ModuleLoader__.load({
 						label: t("allowInsecureHttp"),
 						disabled
 					})
+				),
+
+				// Web Search Section
+				h("div", { style: { marginTop: "8px", paddingTop: "16px", borderTop: "1px solid var(--dsw-alias-border-subtle, rgba(128, 128, 128, 0.2))" } },
+					h("h3", { style: { fontSize: "14px", fontWeight: 600, margin: "0 0 12px 0" } }, t("webSearchHeading")),
+
+					// Web Search Enabled (Switch)
+					h("div", { style: { ...fieldStyle, flexDirection: "row", alignItems: "center", justifyContent: "space-between" }, "data-field": "webSearchEnabled" },
+						h("div", { style: { display: "flex", flexDirection: "column", gap: "2px" } },
+							h("span", { style: labelStyle }, t("webSearchEnabled")),
+							h("p", { style: hintStyle }, t("webSearchEnabledHint"))
+						),
+						h(Switch, {
+							checked: drafts.webSearchEnabled === "true",
+							onChange: (checked) => setDrafts((curr) => ({ ...curr, webSearchEnabled: checked ? "true" : "false" })),
+							label: t("webSearchEnabled"),
+							disabled
+						})
+					),
+
+					// Web Search Instruction Mode (Segmented Control)
+					h("div", { style: fieldStyle, "data-field": "webSearchInstructionMode" },
+						h("label", { style: labelStyle }, t("webSearchInstructionMode")),
+						h(SegmentedControl, {
+							id: "magpie-web-search-instruction-mode",
+							value: drafts.webSearchInstructionMode || "normal",
+							options: MODES.map((mode) => ({ value: mode, label: mode })),
+							onChange: (mode) => setDrafts((curr) => ({ ...curr, webSearchInstructionMode: mode })),
+							label: t("webSearchInstructionMode"),
+							disabled
+						}),
+						h("p", { style: hintStyle }, t("webSearchInstructionModeHint"))
+					)
 				),
 
 				// Action buttons
