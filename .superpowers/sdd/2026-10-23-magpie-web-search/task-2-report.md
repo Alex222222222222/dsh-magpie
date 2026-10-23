@@ -17,13 +17,14 @@ Advertised tools are checked with `assertObjectJsonSchema`; task-required, malfo
 
 - RED: `node --test --test-name-pattern='web search discovers|web search forwards|web search disabled' magpie-vision/test/self-check.mjs` failed as expected before implementation: discovery registered no search tools and forwarding had no tool definition.
 - RED: after temporarily removing the call-error sanitizer, `node --test --test-name-pattern='web search call errors redact' magpie-vision/test/self-check.mjs` failed with the bearer value present in the observed error. Restoring redaction made it pass.
-- RED: `node --test --test-name-pattern='web search initial list failures retry and recover' magpie-vision/test/self-check.mjs` failed as expected: `AssertionError [ERR_ASSERTION]: expected 2 tools/list requests, got 1` after the initial failure and 500 ms.
-- GREEN: `node --test --test-name-pattern='web search initial list failures retry|web search initial failures retry|web search cleanup cancels|web search cleanup closes' magpie-vision/test/self-check.mjs` passed 4 tests, 0 failures (exit 0): recovery, ten-attempt capped backoff, retry timer cancellation, and in-flight client teardown.
-- Full suite: `npm test` passed 46 tests, 0 failures (exit 0); final output summary: `ℹ tests 46`, `ℹ pass 46`, `ℹ fail 0`, `ℹ duration_ms 2353.66925`.
+- RED: `node --test --test-name-pattern='web search initial list failures retry and recover' magpie-vision/test/self-check.mjs` failed as expected: the transient `tools/list` failure left only one `tools/list` request after the retry interval; no search tool was registered.
+- GREEN: `node --test --test-name-pattern='web search initial list failures retry|web search initial failures retry ten times|web search cleanup cancels|web search cleanup closes' magpie-vision/test/self-check.mjs` passed 4 tests, 0 failures: recovery and registration, no overlap, ten-attempt capped backoff, retry timer cancellation, and in-flight client teardown.
+- Required focused tests: `node --test --test-name-pattern='web search discovers|web search forwards|web search disabled' magpie-vision/test/self-check.mjs` passed 3 tests, 0 failures.
+- Full suite: `npm test` passed 46 tests, 0 failures (exit 0); final output summary: `ℹ tests 46`, `ℹ pass 46`, `ℹ fail 0`, `ℹ duration_ms 2561.02525`.
 - Type-check: `deno check --no-lock --node-modules-dir=manual magpie-vision/src/index.ts` passed (exit 0); output: `Check magpie-vision/src/index.ts`.
-- Generated bundle: `deno transpile --no-check --no-lock --node-modules-dir=manual --source-map=none magpie-vision/src/index.ts --output magpie-vision/index.js` emitted the bundle with retry scheduling and pending-client teardown.
+- Generated bundle: `deno transpile --no-check --no-lock --node-modules-dir=manual --source-map=none magpie-vision/src/index.ts --output magpie-vision/index.js` emitted the bundle; a second fresh emit compared byte-for-byte equal.
 - `git diff --check` passed (exit 0).
-- Temporary `node_modules` symlink and baseline artifacts were removed.
+- The temporary `node_modules` symlink was removed after verification.
 
 ## Scope and concerns
 
@@ -34,5 +35,6 @@ The commit includes initial connection retries, retry timer and in-flight client
 ## Commits
 
 - Original Task 2 implementation: `3c58eaa` (`feat: connect Magpie web search MCP tools`).
-- Retry fix: `1f850b0e073784f366fba8e0fd9455b40d6fc861` (`fix: retry failed web search startup`), pushed to `origin/feat/magpie-web-search`.
-- The push response reported two Dependabot vulnerabilities on the repository default branch (one high, one moderate); they are unrelated to these changes.
+- Retry-test helper correction: `d21c89a` (`test: fix web search retry regression helper`), committed locally.
+- Push status: `d21c89a` could not be pushed; GitHub returned an HTTP/2 framing error, and the HTTP/1.1 retry could not connect to `github.com:443`. The branch is ahead of `origin/feat/magpie-web-search` by two commits (`d21c89a` and this report update).
+- Retry fix: `1f850b0e073784f366fba8e0fd9455b40d6fc861` (`fix: retry failed web search startup`), already pushed to `origin/feat/magpie-web-search`.
