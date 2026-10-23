@@ -111,12 +111,95 @@ test('Config applies documented defaults as live references the settings page ca
   assert.deepEqual(readConfig(config), {
     enabled: true,
     instructionMode: 'normal',
+    webSearchEnabled: false,
+    webSearchInstructionMode: 'normal',
     gatewayUrl: undefined,
     tokenEnv: 'MAGPIE_API_KEY',
     allowInsecureHttp: false
   });
   for (const field of ['instructionMode', 'gatewayUrl', 'tokenEnv', 'allowInsecureHttp']) {
     assert.equal(typeof config[field]?.get, 'function', `${field} must be volatile so the settings page can edit it`);
+  }
+});
+
+test('web search config defaults off with independently editable live settings', () => {
+  const config = Config({});
+  assert.equal(readConfig(config).webSearchEnabled, false);
+  assert.equal(readConfig(config).webSearchInstructionMode, 'normal');
+  for (const field of ['webSearchEnabled', 'webSearchInstructionMode']) {
+    assert.equal(typeof config[field]?.get, 'function', `${field} must be volatile`);
+  }
+  assert.throws(() => Config({ webSearchInstructionMode: 'always' }), /webSearchInstructionMode/);
+});
+
+test('web search instructions stay independent of images and follow live mode and visible names', async () => {
+  let enabled = true;
+  let mode = 'normal';
+  let names = ['mcp__magpie_search__web_search', 'mcp__magpie_search__news_search'];
+  const ctx = context(() => assert.fail('image-disabled search prompt must not register an image tool'));
+  ctx.tools.schemas = (scope) => [...(scope?.hidden ? [] : names), 'analyze_image', 'mcp__other__search'].map((name) => ({ name }));
+  await activate(ctx, {
+    enabled: false,
+    instructionMode: 'force',
+    webSearchEnabled: { get: () => enabled },
+    webSearchInstructionMode: { get: () => mode }
+  });
+  try {
+    assert.equal(ctx.sections.has('magpie:instructions'), false);
+    const section = ctx.sections.get('magpie:web-search-instructions');
+    assert.ok(section, 'search prompt must be installed even when images are disabled');
+    assert.equal(section.text({ scope: {} }), '');
+    mode = 'suggest';
+    assert.match(section.text({ scope: {} }), /prefer.*mcp__magpie_search__web_search.*mcp__magpie_search__news_search/);
+    assert.doesNotMatch(section.text({}), /analyze_image|mcp__other/);
+    assert.equal(section.text({ scope: { hidden: true } }), '');
+    mode = 'force';
+    assert.match(section.text({}), /MUST use.*mcp__magpie_search__web_search/);
+    names = ['mcp__magpie_search__updated_search'];
+    assert.match(section.text({}), /mcp__magpie_search__updated_search/);
+    assert.doesNotMatch(section.text({}), /mcp__magpie_search__web_search/);
+    enabled = false;
+    assert.equal(section.text({}), '');
+    enabled = true;
+    names = [];
+    assert.equal(section.text({}), '');
+  } finally {
+    await ctx.cleanup();
+  }
+  assert.equal(ctx.sections.size, 0);
+});
+
+test('web search instructions support plain settings without changing image guidance', async () => {
+  const ctx = context();
+  ctx.tools.schemas = () => [{ name: 'mcp__magpie_search__web_search' }];
+  const config = { enabled: true, instructionMode: 'suggest', webSearchEnabled: true, webSearchInstructionMode: 'force' };
+  await activate(ctx, config);
+  try {
+    assert.match(ctx.sections.get('magpie:instructions').text({}), /prefer the analyze_image tool/);
+    const section = ctx.sections.get('magpie:web-search-instructions');
+    assert.ok(section);
+    assert.match(section.text({}), /MUST use.*mcp__magpie_search__web_search/);
+    config.webSearchEnabled = false;
+    assert.equal(section.text({}), '');
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('web search disabled defaults make no network requests with blank shared settings', async () => {
+  const mock = await mockMcpServer();
+  const ctx = context(() => assert.fail('disabled images and search must not register tools'));
+  ctx.tools.schemas = () => [{ name: 'mcp__magpie_search__web_search' }];
+  try {
+    const config = Config({ enabled: false, gatewayUrl: mock.gatewayUrl, tokenEnv: '', webSearchInstructionMode: 'force' });
+    await activate(ctx, config);
+    const section = ctx.sections.get('magpie:web-search-instructions');
+    assert.ok(section, 'live search settings must be supported while disabled');
+    assert.equal(section.text({}), '');
+    assert.deepEqual(mock.methods, []);
+  } finally {
+    await ctx.cleanup();
+    await mock.close();
   }
 });
 

@@ -17,6 +17,8 @@ function imageMimeType(bytes: Uint8Array): string | undefined {
 export const Config = z.object({
   enabled: z.boolean().default(true),
   instructionMode: z.union([z.const('normal'), z.const('suggest'), z.const('force')]).default('normal').volatile(),
+  webSearchEnabled: z.boolean().default(false).volatile(),
+  webSearchInstructionMode: z.union([z.const('normal'), z.const('suggest'), z.const('force')]).default('normal').volatile(),
   gatewayUrl: z.string().required(false).volatile(),
   tokenEnv: z.string().default('MAGPIE_API_KEY').volatile(),
   allowInsecureHttp: z.boolean().default(false).volatile()
@@ -36,6 +38,8 @@ type Live<T> = T | Volatile<T>;
 interface VisionConfig {
   enabled: boolean;
   instructionMode?: Live<'normal' | 'suggest' | 'force'>;
+  webSearchEnabled?: Live<boolean>;
+  webSearchInstructionMode?: Live<'normal' | 'suggest' | 'force'>;
   gatewayUrl?: Live<string>;
   tokenEnv: Live<string>;
   allowInsecureHttp: Live<boolean>;
@@ -50,7 +54,7 @@ function read<T>(value: Live<T> | undefined): T | undefined {
 type PluginContext = Context & {
   fs: FileSystem;
   systemPrompt: { section(section: { name: string; order: number; text: (context: { scope?: object }) => string }): () => void };
-  tools: { register(tool: ToolDefinition): () => void; get(name: string, scope?: object): ToolDefinition | undefined };
+  tools: { register(tool: ToolDefinition): () => void; get(name: string, scope?: object): ToolDefinition | undefined; schemas(scope?: object): { name: string }[] };
   logger: Context['logger'];
 };
 
@@ -126,6 +130,21 @@ function textFromResult(result: { content: Array<Record<string, unknown>> }): st
 }
 
 export async function activate(ctx: PluginContext, config: VisionConfig): Promise<void> {
+  if (config.webSearchEnabled !== undefined) {
+    ctx.systemPrompt.section({
+      name: 'magpie:web-search-instructions',
+      order: 3051,
+      text: ({ scope }) => {
+        const mode = read(config.webSearchInstructionMode) ?? 'normal';
+        if (!read(config.webSearchEnabled) || mode === 'normal') return '';
+        const names = ctx.tools.schemas(scope).map((tool) => tool.name).filter((name) => name.startsWith('mcp__magpie_search__'));
+        if (names.length === 0) return '';
+        return mode === 'force'
+          ? `You MUST use the Magpie search tools (${names.join(', ')}) for web research.`
+          : `When web research would help, prefer the Magpie search tools (${names.join(', ')}).`;
+      }
+    });
+  }
   if (!config.enabled) return;
   ctx.systemPrompt.section({
     name: 'magpie:instructions',

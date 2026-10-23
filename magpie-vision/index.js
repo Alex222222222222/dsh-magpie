@@ -28,6 +28,12 @@ export const Config = z.object({
     z.const('suggest'),
     z.const('force')
   ]).default('normal').volatile(),
+  webSearchEnabled: z.boolean().default(false).volatile(),
+  webSearchInstructionMode: z.union([
+    z.const('normal'),
+    z.const('suggest'),
+    z.const('force')
+  ]).default('normal').volatile(),
   gatewayUrl: z.string().required(false).volatile(),
   tokenEnv: z.string().default('MAGPIE_API_KEY').volatile(),
   allowInsecureHttp: z.boolean().default(false).volatile()
@@ -115,6 +121,19 @@ function textFromResult(result) {
   return result.content.filter((block)=>block.type === 'text' && typeof block.text === 'string').map((block)=>block.text).join('\n');
 }
 export async function activate(ctx, config) {
+  if (config.webSearchEnabled !== undefined) {
+    ctx.systemPrompt.section({
+      name: 'magpie:web-search-instructions',
+      order: 3051,
+      text: ({ scope })=>{
+        const mode = read(config.webSearchInstructionMode) ?? 'normal';
+        if (!read(config.webSearchEnabled) || mode === 'normal') return '';
+        const names = ctx.tools.schemas(scope).map((tool)=>tool.name).filter((name)=>name.startsWith('mcp__magpie_search__'));
+        if (names.length === 0) return '';
+        return mode === 'force' ? `You MUST use the Magpie search tools (${names.join(', ')}) for web research.` : `When web research would help, prefer the Magpie search tools (${names.join(', ')}).`;
+      }
+    });
+  }
   if (!config.enabled) return;
   ctx.systemPrompt.section({
     name: 'magpie:instructions',
