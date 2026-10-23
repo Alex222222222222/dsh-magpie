@@ -29,3 +29,5 @@
 - Task 3 BASE: `1f850b0e073784f366fba8e0fd9455b40d6fc861`.
 - Task 3 completed: added live `loader/volatile-update` reconciliation, serialized sync queue, `autoRefresh: false` notification-driven refresh with failure preservation, in-flight call cancellation on disable/cleanup, and retry timer resets. Verification: 7/7 focused tests, 54/54 full suite, `deno check` passed, transpile parity verified. Commit: `66223c6` on `feat/magpie-web-search`, pushed to `origin`. Report: `.superpowers/sdd/2026-10-23-magpie-web-search/task-3-report.md`.
 - Task 4 BASE: `66223c6`.
+- Task 4 completed: added bilingual UI controls for `webSearchEnabled` and `webSearchInstructionMode`, staged parsing/discard, and comprehensive documentation in both READMEs. Verification: `client-check.mjs` 8/8 pass, `npm test` 54/54 pass, `deno check` clean. Commit: `190c4ae` on `feat/magpie-web-search`, pushed to `origin`. Report: `.superpowers/sdd/2026-10-23-magpie-web-search/task-4-report.md`.
+- Task 5 BASE: `190c4ae`.
