@@ -24,7 +24,7 @@ function imageMimeType(bytes) {
   return undefined;
 }
 export const Config = z.object({
-  enabled: z.boolean().default(true),
+  enabled: z.boolean().default(true).volatile(),
   instructionMode: z.union([
     z.const('normal'),
     z.const('suggest'),
@@ -70,7 +70,7 @@ export function searchEndpoint(gatewayUrl) {
   return `${gatewayUrl.trim().replace(/\/+$/, '')}/mcp/magpie/web-search`;
 }
 function resolveEndpoint(config) {
-  if (!config.enabled) return undefined;
+  if (!read(config.enabled)) return undefined;
   return resolveGateway(config, visionEndpoint);
 }
 function resolveGateway(config, endpointFor) {
@@ -150,7 +150,7 @@ const SEARCH_RETRY_DELAYS = [
   30_000
 ];
 export async function activate(ctx, config) {
-  if (read(config.allowInsecureHttp) && (config.enabled || read(config.webSearchEnabled))) {
+  if (read(config.allowInsecureHttp) && (read(config.enabled) || read(config.webSearchEnabled))) {
     ctx.logger('magpie').warn('magpie: allowInsecureHttp is enabled; if HTTP is used, the bearer credential may be exposed in transit');
   }
   if (config.webSearchEnabled !== undefined) {
@@ -441,16 +441,9 @@ export async function activate(ctx, config) {
       }
     }
   }
-  if (!config.enabled) return;
-  ctx.systemPrompt.section({
-    name: 'magpie:instructions',
-    order: 3050,
-    text: ({ scope })=>{
-      const mode = read(config.instructionMode) ?? 'normal';
-      return mode === 'normal' || ctx.tools.get('analyze_image', scope) === undefined ? '' : INSTRUCTIONS[mode];
-    }
-  });
   let disposed = false;
+  let disposeImageTool;
+  let disposeImagePrompt;
   const activeClients = new Map();
   const activeWork = new Set();
   const tool = defineTool({
@@ -502,6 +495,7 @@ export async function activate(ctx, config) {
     },
     async execute (args, exec) {
       if (disposed) throw new Error('magpie: plugin is shutting down');
+      if (!read(config.enabled)) throw new Error('magpie: image analysis is disabled');
       const workController = new AbortController();
       const abortWork = ()=>workController.abort(exec.signal.reason);
       if (exec.signal.aborted) abortWork();
@@ -520,7 +514,7 @@ export async function activate(ctx, config) {
         activeWork.delete(workController);
       }
       async function run(signal) {
-        if (!config.enabled) throw new Error('magpie: plugin is disabled');
+        if (!read(config.enabled)) throw new Error('magpie: image analysis is disabled');
         // Resolved per call so a settings edit applies without restarting the host.
         const visionEndpoint = resolveEndpoint(config);
         if (visionEndpoint === undefined) {
@@ -559,9 +553,10 @@ export async function activate(ctx, config) {
           // shortcut: ctx.fs has no stable-handle byte read; upgrade when it can no-follow and read atomically.
           const bytes = await ctx.fs.readBytes(target, signal, MAX_IMAGE_BYTES);
           signal.throwIfAborted();
+          if (!read(config.enabled)) throw new Error('magpie: image analysis is disabled');
           image = imageData(input, bytes);
         }
-        if (disposed) throw new Error('magpie: plugin is shutting down');
+        if (!read(config.enabled)) throw new Error('magpie: image analysis is disabled');
         const client = new Client({
           name: 'dsh-magpie',
           version: '1.0.0'
@@ -615,11 +610,41 @@ export async function activate(ctx, config) {
       }
     }
   });
+  const syncImageFeature = ()=>{
+    const enabled = Boolean(read(config.enabled));
+    if (!enabled) {
+      disposeImageTool?.();
+      disposeImageTool = undefined;
+      disposeImagePrompt?.();
+      disposeImagePrompt = undefined;
+      for (const controller of activeWork)controller.abort(new Error('magpie: image analysis is disabled'));
+      return;
+    }
+    if (!disposeImagePrompt) {
+      disposeImagePrompt = ctx.systemPrompt.section({
+        name: 'magpie:instructions',
+        order: 3050,
+        text: ({ scope })=>{
+          if (!read(config.enabled)) return '';
+          const mode = read(config.instructionMode) ?? 'normal';
+          return mode === 'normal' || ctx.tools.get('analyze_image', scope) === undefined ? '' : INSTRUCTIONS[mode];
+        }
+      });
+    }
+    if (!disposeImageTool) disposeImageTool = ctx.tools.register(tool);
+  };
   ctx.effect(()=>{
-    const dispose = ctx.tools.register(tool);
+    const off = ctx.on('loader/volatile-update', (paths)=>{
+      if (paths.some((path)=>path[0] === 'enabled')) syncImageFeature();
+    });
+    syncImageFeature();
     return async ()=>{
       disposed = true;
-      dispose();
+      off();
+      disposeImageTool?.();
+      disposeImageTool = undefined;
+      disposeImagePrompt?.();
+      disposeImagePrompt = undefined;
       for (const controller of activeWork)controller.abort(new Error('magpie: plugin is shutting down'));
       await Promise.all([
         ...activeClients

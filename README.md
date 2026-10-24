@@ -31,7 +31,7 @@ Set `MAGPIE_API_KEY` in the environment of the DSH Host process. In the `web` pr
     instructionMode: normal
     webSearchEnabled: false
     webSearchInstructionMode: normal
-    gatewayUrl: https://magpie-gateway.alex1222.com/
+    gatewayUrl: https://example.com/
     tokenEnv: MAGPIE_API_KEY
     allowInsecureHttp: false
 ```
@@ -40,15 +40,15 @@ Set `MAGPIE_API_KEY` in the environment of the DSH Host process. In the `web` pr
 
 | Setting | Default | Live UI | Meaning |
 | --- | --- | --- | --- |
-| `enabled` | `true` | Row switch | Set to `false` to disable image analysis. Web search continues independently according to `webSearchEnabled`. |
+| `enabled` | `true` | Yes (volatile) | Independently enables image analysis. Turning it off removes `analyze_image` and image prompt guidance while leaving web search unchanged. |
 | `instructionMode` | `normal` | Yes (volatile) | `normal` adds no prompt text; `suggest` and `force` add guidance to use image analysis tools. |
 | `webSearchEnabled` | `false` | Yes (volatile) | Set to `true` to enable web search tool discovery and registration. Defaults off. |
 | `webSearchInstructionMode` | `normal` | Yes (volatile) | `normal` adds no prompt text; `suggest` recommends search tools; `force` requires them for web research. |
-| `gatewayUrl` | unset | Yes (volatile) | Shared base URL of the Magpie gateway, for example `https://magpie-gateway.alex1222.com/`. Appends `mcp/magpie/vision` for images and `mcp/magpie/web-search` for search. |
+| `gatewayUrl` | unset | Yes (volatile) | Shared base URL of the Magpie gateway, for example `https://example.com/`. Appends `mcp/magpie/vision` for images and `mcp/magpie/web-search` for search. |
 | `tokenEnv` | `MAGPIE_API_KEY` | Yes (volatile) | Shared environment-variable name containing the bearer token. |
 | `allowInsecureHttp` | `false` | Yes (volatile) | Set to `true` to permit an HTTP gateway. |
 
-`instructionMode`, `webSearchEnabled`, `webSearchInstructionMode`, `gatewayUrl`, `tokenEnv`, and `allowInsecureHttp` are volatile configuration fields. Edits made through the DSH settings service update live references and apply to subsequent tool calls, prompt generation, and connector lifecycle immediately without restarting the host.
+`enabled`, `instructionMode`, `webSearchEnabled`, `webSearchInstructionMode`, `gatewayUrl`, `tokenEnv`, and `allowInsecureHttp` are volatile configuration fields. Edits made through the DSH settings service update live references and apply to subsequent tool calls, prompt generation, and connector lifecycle immediately without restarting the host.
 
 HTTPS is required by default. Setting `allowInsecureHttp: true` permits HTTP and always emits a warning, including when the configured gateway is HTTPS, because the bearer key would be exposed if the gateway were changed to HTTP. The URL must not include user information. The token is sent only in the `Authorization: Bearer …` header.
 
@@ -68,10 +68,9 @@ Settings can be managed directly in the DSH Web UI without editing YAML files ma
 The panel provides staged editing with validation:
 - **Gateway URL**: Text input with absolute HTTP/HTTPS URL validation.
 - **Token environment variable**: Text input validating standard environment variable names.
-- **Agent instructions**: Segmented control (`normal`, `suggest`, `force`) for image analysis.
+- **Image analysis**: Independent enable switch and instruction mode (`normal`, `suggest`, `force`).
 - **Allow plain HTTP**: Toggle switch for insecure HTTP access.
-- **Enable web search**: Toggle switch to enable or disable web search tools.
-- **Web search instructions**: Segmented control (`normal`, `suggest`, `force`) for web search tools.
+- **Web search**: Independent enable switch and instruction mode (`normal`, `suggest`, `force`).
 - **Save & Discard**: Revision-fenced save writing directly into the active profile's Cordis patch, and a discard button to revert drafts to stored snapshot values.
 - **Bilingual**: Supports English and Chinese locales (`settings.magpie` namespace).
 
@@ -96,7 +95,7 @@ When `webSearchEnabled: true`, the connector connects to `${gatewayUrl}/mcp/magp
 - **List-change notifications**: Subscribes to `notifications/tools/list_changed` (`autoRefresh: false`) and automatically refreshes registered tools on a serialized queue. If a refresh fails, the last known-good generation is kept.
 - **Retry backoff**: Initial connection and discovery failures retry up to 10 attempts (delays: 500 ms, 1 s, 2 s, 4 s, 8 s, 16 s, then 30 s for remaining attempts). Changing configuration settings immediately cancels pending retry timers, resets the retry budget, and reconnects.
 - **Security & Redaction**: The bearer token is never exposed in tool arguments, results, structured content, or error diagnostics.
-- **Lifecycle & Teardown**: Disabling search (`webSearchEnabled: false`) or plugin effect disposal unregisters all search tools, aborts in-flight search call controllers, and cleanly closes MCP clients. Disabling image analysis (`enabled: false`) leaves search active if `webSearchEnabled` is enabled.
+- **Lifecycle & Teardown**: Disabling search (`webSearchEnabled: false`) or plugin effect disposal unregisters all search tools, aborts in-flight search call controllers, and cleanly closes MCP clients. Turning image analysis off unregisters `analyze_image` and its prompt guidance without affecting web search; turning web search off removes only search tools. Both settings apply immediately in the Web UI.
 
 ## Tool: analyze_image
 

@@ -72,8 +72,8 @@ const t = (key) => messages[key];
 const copies = {
   ready: {
     status: 'ready',
-    value: { gatewayUrl: 'https://magpie-gateway.alex1222.com/', tokenEnv: 'MAGPIE_API_KEY', instructionMode: 'suggest', allowInsecureHttp: false, webSearchEnabled: false, webSearchInstructionMode: 'normal' },
-    base: { gatewayUrl: 'https://composed.example/', instructionMode: 'normal', tokenEnv: 'MAGPIE_API_KEY', allowInsecureHttp: false, webSearchEnabled: false, webSearchInstructionMode: 'normal' },
+    value: { gatewayUrl: 'https://example.com/', tokenEnv: 'MAGPIE_API_KEY', enabled: true, instructionMode: 'suggest', allowInsecureHttp: false, webSearchEnabled: false, webSearchInstructionMode: 'normal' },
+    base: { gatewayUrl: 'https://example.com/', enabled: true, instructionMode: 'normal', tokenEnv: 'MAGPIE_API_KEY', allowInsecureHttp: false, webSearchEnabled: false, webSearchInstructionMode: 'normal' },
     user: { instructionMode: 'suggest' },
     writable: true,
     revision: 7
@@ -137,7 +137,7 @@ test('an unavailable deployment reports it instead of a form', () => {
   assert.equal(text(tree), messages.unavailable);
 });
 
-test('the page stages all six settings and saves them in one revision-fenced write', async () => {
+test('the page stages all seven settings and saves them in one revision-fenced write', async () => {
   freshRender();
   const calls = [];
   const form = { state: copies.ready, mutate: async (ops, revision) => { calls.push({ ops, revision }); return true; } };
@@ -150,23 +150,27 @@ test('the page stages all six settings and saves them in one revision-fenced wri
   assert.equal(segmented[0].props.value, 'suggest');
   assert.equal(segmented[1].props.value, 'normal');
   const toggle = findAll(tree, 'Switch');
-  assert.equal(toggle.length, 2);
-  assert.equal(toggle[0].props.checked, false);
+  assert.equal(toggle.length, 3);
+  assert.equal(toggle[0].props.checked, true);
   assert.equal(toggle[1].props.checked, false);
+  assert.equal(toggle[2].props.checked, false);
 
   // Edit gatewayUrl
   inputs[0].props.onChange({ target: { value: 'https://other.example' } });
-  // Edit allowInsecureHttp
-  toggle[0].props.onChange(true);
-  // Edit webSearchEnabled
+  // Disable image analysis independently of web search
+  toggle[0].props.onChange(false);
+  // Allow plain HTTP
   toggle[1].props.onChange(true);
+  // Enable web search independently of image analysis
+  toggle[2].props.onChange(true);
   // Edit webSearchInstructionMode
   segmented[1].props.onChange('force');
 
   tree = render({ t, view: 'page', form });
   assert.equal(findAll(tree, 'Input')[0].props.value, 'https://other.example');
-  assert.equal(findAll(tree, 'Switch')[0].props.checked, true);
+  assert.equal(findAll(tree, 'Switch')[0].props.checked, false);
   assert.equal(findAll(tree, 'Switch')[1].props.checked, true);
+  assert.equal(findAll(tree, 'Switch')[2].props.checked, true);
   assert.equal(findAll(tree, 'SegmentedControl')[1].props.value, 'force');
 
   await buttonByText(tree, messages.save).props.onClick();
@@ -174,6 +178,7 @@ test('the page stages all six settings and saves them in one revision-fenced wri
     ops: [
       { op: 'set', path: ['gatewayUrl'], value: 'https://other.example' },
       { op: 'set', path: ['tokenEnv'], value: 'MAGPIE_API_KEY' },
+      { op: 'set', path: ['enabled'], value: false },
       { op: 'set', path: ['instructionMode'], value: 'suggest' },
       { op: 'set', path: ['allowInsecureHttp'], value: true },
       { op: 'set', path: ['webSearchEnabled'], value: true },
@@ -182,6 +187,13 @@ test('the page stages all six settings and saves them in one revision-fenced wri
     revision: 7
   }]);
   assert.match(text(render({ t, view: 'page', form })), /saved/);
+});
+
+test('page fields do not use a service-specific gateway placeholder or repeat the page description', () => {
+  freshRender();
+  const tree = render({ t, view: 'page', form: { state: copies.ready } });
+  assert.equal(findAll(tree, 'Input')[0].props.placeholder, 'https://example.com/');
+  assert.equal(text(tree).split(messages.description).length - 1, 0);
 });
 
 test('an invalid draft blocks saving and is reported on the field', async () => {
@@ -201,14 +213,19 @@ test('discard resets drafts back to stored snapshot values', async () => {
   const form = { state: copies.ready, mutate: async () => false };
   let tree = render({ t, view: 'page', form });
   findAll(tree, 'Input')[0].props.onChange({ target: { value: 'https://temporary.example' } });
+  findAll(tree, 'Switch')[0].props.onChange(false);
   findAll(tree, 'Switch')[1].props.onChange(true);
+  findAll(tree, 'Switch')[2].props.onChange(true);
   tree = render({ t, view: 'page', form });
   assert.equal(findAll(tree, 'Input')[0].props.value, 'https://temporary.example');
+  assert.equal(findAll(tree, 'Switch')[0].props.checked, false);
   assert.equal(findAll(tree, 'Switch')[1].props.checked, true);
+  assert.equal(findAll(tree, 'Switch')[2].props.checked, true);
   buttonByText(tree, messages.discard).props.onClick();
   tree = render({ t, view: 'page', form });
-  assert.equal(findAll(tree, 'Input')[0].props.value, 'https://magpie-gateway.alex1222.com/');
-  assert.equal(findAll(tree, 'Switch')[1].props.checked, false);
+  assert.equal(findAll(tree, 'Input')[0].props.value, 'https://example.com/');
+  assert.equal(findAll(tree, 'Switch')[0].props.checked, true);
+  assert.equal(findAll(tree, 'Switch')[2].props.checked, false);
 });
 
 test('a read-only document disables the controls and says so', () => {

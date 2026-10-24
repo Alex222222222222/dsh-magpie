@@ -61,8 +61,8 @@ const context = (registered = () => {}, warnings = []) => {
         return () => toolMap.delete(tool.name);
       },
       get(name, scope) {
-        if (scope?.hidden && (name === 'analyze_image' || name.startsWith('mcp__magpie_search__'))) return undefined;
-        return name === 'analyze_image' ? { name } : toolMap.get(name);
+        if (scope?.hidden) return undefined;
+        return toolMap.get(name);
       },
       schemas(scope) { return [...toolMap.keys()].filter((name) => !(scope?.hidden && name.startsWith('mcp__magpie_search__'))).map((name) => ({ name })); }
     },
@@ -831,9 +831,52 @@ test('web search reconnects when tokenEnv or allowInsecureHttp changes', async (
   }
 });
 
+test('image analysis toggle independently adds and removes its tool and prompt', async () => {
+  const previous = process.env.MAGPIE_VISION_SELF_CHECK;
+  process.env.MAGPIE_VISION_SELF_CHECK = 'search-self-check-token';
+  const mock = await mockMcpServer({ tools: [
+    { name: 'analyze_image', inputSchema: { type: 'object', properties: { image: { type: 'string' } } } },
+    { name: 'web_search', inputSchema: { type: 'object', properties: { query: { type: 'string' } } } }
+  ] });
+  let imageEnabled = true;
+  const ctx = context();
+  try {
+    await activate(ctx, {
+      enabled: { get: () => imageEnabled },
+      instructionMode: { get: () => 'suggest' },
+      webSearchEnabled: true,
+      webSearchInstructionMode: 'normal',
+      gatewayUrl: mock.gatewayUrl,
+      tokenEnv: 'MAGPIE_VISION_SELF_CHECK',
+      allowInsecureHttp: true
+    });
+    await mock.waitForMethod('tools/list', 1);
+    await waitFor(() => ctx.tools.get('mcp__magpie_search__web_search'), 'search tool should load independently');
+    assert.ok(ctx.tools.get('analyze_image'));
+    assert.ok(ctx.sections.get('magpie:instructions'));
+
+    imageEnabled = false;
+    ctx.emit('loader/volatile-update', [['enabled']]);
+    await waitFor(() => !ctx.tools.get('analyze_image'), 'image tool should unregister when image analysis is disabled');
+    assert.equal(ctx.sections.get('magpie:instructions'), undefined);
+    assert.ok(ctx.tools.get('mcp__magpie_search__web_search'));
+
+    imageEnabled = true;
+    ctx.emit('loader/volatile-update', [['enabled']]);
+    await waitFor(() => ctx.tools.get('analyze_image'), 'image tool should register when image analysis is enabled');
+    assert.ok(ctx.sections.get('magpie:instructions'));
+    assert.ok(ctx.tools.get('mcp__magpie_search__web_search'));
+  } finally {
+    await ctx.cleanup();
+    await mock.close();
+    if (previous === undefined) delete process.env.MAGPIE_VISION_SELF_CHECK;
+    else process.env.MAGPIE_VISION_SELF_CHECK = previous;
+  }
+});
+
 test('the vision MCP endpoint is derived from the gateway URL', () => {
-  assert.equal(visionEndpoint('https://magpie-gateway.alex1222.com/'), 'https://magpie-gateway.alex1222.com/mcp/magpie/vision');
-  assert.equal(visionEndpoint('https://magpie-gateway.alex1222.com'), 'https://magpie-gateway.alex1222.com/mcp/magpie/vision');
+  assert.equal(visionEndpoint('https://example.com/'), 'https://example.com/mcp/magpie/vision');
+  assert.equal(visionEndpoint('https://example.com'), 'https://example.com/mcp/magpie/vision');
   assert.equal(visionEndpoint('https://example.com/gateway/'), 'https://example.com/gateway/mcp/magpie/vision');
   assert.equal(visionEndpoint('  https://example.com  '), 'https://example.com/mcp/magpie/vision');
 });

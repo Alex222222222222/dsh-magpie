@@ -10,13 +10,16 @@ window.__ModuleLoader__.load({
 		// Copy for the Magpie configuration page.
 		const en = {
 			title: "Magpie",
-			description: "Set the Magpie gateway this plugin calls for image analysis.",
+			description: "Configure the shared Magpie gateway for image analysis and web search.",
 			gatewayUrl: "Gateway URL",
 			gatewayUrlHint: "Base URL of the Magpie gateway; the plugin appends mcp/magpie/vision.",
 			tokenEnv: "Token environment variable",
 			tokenEnvHint: "Name of the Host environment variable that holds the bearer key.",
 			instructionMode: "Agent instructions",
 			instructionModeHint: "normal adds no prompt text; suggest recommends the tool; force requires using it for image inspection.",
+			imageAnalysisHeading: "Image analysis",
+			imageAnalysisEnabled: "Enable image analysis",
+			imageAnalysisEnabledHint: "Expose the analyze_image tool to agents.",
 			allowInsecureHttp: "Allow plain HTTP",
 			allowInsecureHttpHint: "Permit an http gateway; the bearer key will travel unencrypted.",
 			webSearchHeading: "Web search",
@@ -35,13 +38,16 @@ window.__ModuleLoader__.load({
 		};
 		const zh = {
 			title: "Magpie",
-			description: "设置本插件做图像分析时调用的 Magpie 网关。",
+			description: "配置用于图像分析和网页搜索的 Magpie 网关。",
 			gatewayUrl: "网关地址",
 			gatewayUrlHint: "Magpie 网关的基础地址；插件会自动追加 mcp/magpie/vision。",
 			tokenEnv: "令牌环境变量",
 			tokenEnvHint: "存放 bearer 密钥的宿主环境变量名。",
 			instructionMode: "Agent 指令",
 			instructionModeHint: "normal 不添加系统提示；suggest 推荐使用；force 强制要求在图像分析时使用。",
+			imageAnalysisHeading: "图像分析",
+			imageAnalysisEnabled: "启用图像分析",
+			imageAnalysisEnabledHint: "向 Agent 提供 analyze_image 工具。",
 			allowInsecureHttp: "允许明文 HTTP",
 			allowInsecureHttpHint: "允许 http 网关；此时 bearer 密钥将明文传输。",
 			webSearchHeading: "网页搜索",
@@ -62,7 +68,7 @@ window.__ModuleLoader__.load({
 		const NS = "settings.magpie";
 		const PKG = "@alex222222222222/magpie";
 		const ROW = "magpie";
-		const FIELD_ORDER = ["gatewayUrl", "tokenEnv", "instructionMode", "allowInsecureHttp", "webSearchEnabled", "webSearchInstructionMode"];
+		const FIELD_ORDER = ["gatewayUrl", "tokenEnv", "enabled", "instructionMode", "allowInsecureHttp", "webSearchEnabled", "webSearchInstructionMode"];
 		const MODES = ["normal", "suggest", "force"];
 
 		/** One field's stored value from the form snapshot, unwrapping the section object. */
@@ -74,11 +80,12 @@ window.__ModuleLoader__.load({
 		/** Draft text for one field, matching how the field renders its stored value. */
 		function draftText(value, field) {
 			if (value === undefined || value === null) {
+				if (field === "enabled") return "true";
 				if (field === "webSearchEnabled") return "false";
 				if (field === "webSearchInstructionMode") return "normal";
 				return "";
 			}
-			if (field === "allowInsecureHttp" || field === "webSearchEnabled") return value === true ? "true" : "false";
+			if (field === "enabled" || field === "allowInsecureHttp" || field === "webSearchEnabled") return value === true ? "true" : "false";
 			return String(value);
 		}
 
@@ -147,7 +154,6 @@ window.__ModuleLoader__.load({
 			const errorStyle = { fontSize: "12px", color: "var(--dsw-alias-intent-danger, #d32f2f)", margin: 0 };
 
 			return h("div", { "data-magpie-config-page": true, style: { display: "flex", flexDirection: "column", maxWidth: "560px", padding: "12px 0" } },
-				h("p", { style: { fontSize: "13px", opacity: 0.8, marginBottom: "16px" } }, t("description")),
 
 				// Gateway URL (Text Input)
 				h("div", { style: fieldStyle, "data-field": "gatewayUrl" },
@@ -155,7 +161,7 @@ window.__ModuleLoader__.load({
 					h(Input, {
 						id: "magpie-gateway-url",
 						value: drafts.gatewayUrl ?? "",
-						placeholder: "https://magpie-gateway.alex1222.com/",
+						placeholder: "https://example.com/",
 						disabled,
 						onChange: (e) => setDrafts((curr) => ({ ...curr, gatewayUrl: e.target.value }))
 					}),
@@ -179,18 +185,33 @@ window.__ModuleLoader__.load({
 						: h("p", { style: hintStyle }, t("tokenEnvHint"))
 				),
 
-				// Instruction Mode (Segmented Control)
-				h("div", { style: fieldStyle, "data-field": "instructionMode" },
-					h("label", { style: labelStyle }, t("instructionMode")),
-					h(SegmentedControl, {
-						id: "magpie-instruction-mode",
-						value: drafts.instructionMode || "normal",
-						options: MODES.map((mode) => ({ value: mode, label: mode })),
-						onChange: (mode) => setDrafts((curr) => ({ ...curr, instructionMode: mode })),
-						label: t("instructionMode"),
-						disabled
-					}),
-					h("p", { style: hintStyle }, t("instructionModeHint"))
+				// Image Analysis Section
+				h("div", { style: { marginTop: "8px", paddingTop: "16px", borderTop: "1px solid var(--dsw-alias-border-subtle, rgba(128, 128, 128, 0.2))" } },
+					h("h3", { style: { fontSize: "14px", fontWeight: 600, margin: "0 0 12px 0" } }, t("imageAnalysisHeading")),
+					h("div", { style: { ...fieldStyle, flexDirection: "row", alignItems: "center", justifyContent: "space-between" }, "data-field": "enabled" },
+						h("div", { style: { display: "flex", flexDirection: "column", gap: "2px" } },
+							h("span", { style: labelStyle }, t("imageAnalysisEnabled")),
+							h("p", { style: hintStyle }, t("imageAnalysisEnabledHint"))
+						),
+						h(Switch, {
+							checked: drafts.enabled === "true",
+							onChange: (checked) => setDrafts((curr) => ({ ...curr, enabled: checked ? "true" : "false" })),
+							label: t("imageAnalysisEnabled"),
+							disabled
+						})
+					),
+					h("div", { style: fieldStyle, "data-field": "instructionMode" },
+						h("label", { style: labelStyle }, t("instructionMode")),
+						h(SegmentedControl, {
+							id: "magpie-instruction-mode",
+							value: drafts.instructionMode || "normal",
+							options: MODES.map((mode) => ({ value: mode, label: mode })),
+							onChange: (mode) => setDrafts((curr) => ({ ...curr, instructionMode: mode })),
+							label: t("instructionMode"),
+							disabled
+						}),
+						h("p", { style: hintStyle }, t("instructionModeHint"))
+					)
 				),
 
 				// Allow Plain HTTP (Switch)
