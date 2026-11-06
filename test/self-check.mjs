@@ -3,6 +3,7 @@ import { once } from 'node:events';
 import pathModule from 'node:path';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import * as plugin from '../index.js';
 
@@ -1389,4 +1390,14 @@ test('image data checks bytes and accepts only PNG, JPEG, WebP, or GIF', () => {
   assert.equal(imageData('photo.webp', Buffer.from('RIFF0000WEBP')), `data:image/webp;base64,${Buffer.from('RIFF0000WEBP').toString('base64')}`);
   assert.throws(() => imageData('photo.png', Uint8Array.of(1)), /PNG, JPEG, WebP, or GIF/);
   assert.throws(() => imageData('large.gif', new Uint8Array(20 * 1024 * 1024 + 1)), /20 MiB/);
+});
+
+test('package manifest peerDependencies and engines support DSH 0.2.2-rc.1 and 0.2.0-rc.2', async () => {
+  const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  assert.equal(manifest.engines?.dsh, '^0.2.0-0');
+  for (const dep of ['@deepseek-ai/dsh-fs', '@deepseek-ai/dsh-mcp-client', '@deepseek-ai/dsh-tools']) {
+    const range = manifest.peerDependencies?.[dep];
+    assert.ok(range && range.startsWith('^0.2.0'), `${dep} should allow 0.2.x, got ${range}`);
+    assert.notEqual(range, '0.2.0-rc.2', `${dep} must not be pinned to exact 0.2.0-rc.2`);
+  }
 });
